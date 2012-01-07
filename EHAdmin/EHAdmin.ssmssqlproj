@@ -1,0 +1,142 @@
+<?xml version="1.0"?>
+<SqlWorkbenchSqlProject xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Name="EHAdmin">
+  <Items>
+    <LogicalFolder Name="Connections" Type="2" Sorted="true">
+      <Items>
+        <ConnectionNode Name="(localDB)\v11.0:BILL764\bwunder">
+          <Created>2011-11-27T07:19:35.8599466-07:00</Created>
+          <Type>SQL</Type>
+          <Server>(localDB)\v11.0</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="BILL764\CTP3:BILL764\bwunder">
+          <Created>2011-10-02T06:17:36.4982913-06:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\CTP3</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="BILL764\rc0:BILL764\bwunder">
+          <Created>2011-12-05T17:47:57.0059506-07:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\rc0</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="BILL764\rc0:jr">
+          <Created>2011-12-11T07:47:06.9197495-07:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\rc0</Server>
+          <UserName>jr</UserName>
+          <Authentication>SQL</Authentication>
+          <InitialDB>ehdb</InitialDB>
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="BILL764\rc11:BILL764\bwunder">
+          <Created>2011-11-27T01:19:39.0029642-07:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\rc11</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="BILL764\rc11:bwunder">
+          <Created>2011-12-02T06:48:02.281448-07:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\rc11</Server>
+          <UserName>bwunder</UserName>
+          <Authentication>SQL</Authentication>
+          <InitialDB>ehHub</InitialDB>
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+        <ConnectionNode Name="vucjhke38b.database.windows.net:bwunder">
+          <Created>2011-12-13T19:38:04.9131457-07:00</Created>
+          <Type>SQL</Type>
+          <Server>vucjhke38b.database.windows.net</Server>
+          <UserName>bwunder</UserName>
+          <Authentication>SQL</Authentication>
+          <InitialDB>ehdbHub</InitialDB>
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Queries" Type="0" Sorted="true">
+      <Items>
+        <FileNode Name="DataDump.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>DataDump.sql</FullPath>
+        </FileNode>
+        <FileNode Name="get node.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>get node.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Install.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>Install.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Offsite.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>Offsite.sql</FullPath>
+        </FileNode>
+        <FileNode Name="SignedObjectEditor (read only).sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>SignedObjectEditor (read only).sql</FullPath>
+        </FileNode>
+        <FileNode Name="test.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>test.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Uninstall.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:BILL764\rc0:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>BILL764\rc0</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>Uninstall.sql</FullPath>
+        </FileNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Miscellaneous" Type="3" Sorted="true">
+      <Items />
+    </LogicalFolder>
+  </Items>
+</SqlWorkbenchSqlProject>
