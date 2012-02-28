@@ -1,3 +1,4 @@
+select * from sys
 /*
 busted pkey when restarted on container activity
 --The duplicate key value is (b48ef09a-1950-4c80-8a59-af8d50025d43, BILL764\RC0)
@@ -25,7 +26,179 @@ OPEN SYMMETRIC KEY ValueKey
 DECRYPTION BY CERTIFICATE ValueCertificate;
 CLOSE ALL SYMMETRIC KEYS;
 */
+--
+use testdb
+if object_id('t1', 'U') is not null
+  drop table t1;
+go
+if object_id('p1', 'P') is not null
+  drop proc p1;
+go
+if object_id('p2', 'P') is not null
+  drop proc p2;
+go
+create table t1 (id int primary key);
+go
+--drop trigger trig_t1 
+create trigger trig_t1 on t1
+instead of insert
+as
+begin
+declare @id int; 
+  set @id = (select i.id 
+             from inserted as i 
+             left join deleted as d 
+             on i.id = d.id where d.id is null)  
+  if @@nestlevel <= 2
+    begin 
+      if @id = 1 
+        raiserror('(%d) trig no error before try-catch is ad hoc will continue',0,3,@id);
+      else
+        raiserror('(2) trig error before try-catch is ad hoc will raise fatal error',16,3);
+    end
+  begin try
+    -- fail if ad hoc
+    if @@nestlevel <= 2
+      begin 
+        if @id = 1 
+          raiserror('(1) trig no error in try do not stop ad hoc',0,3,@@nestlevel);
+        else
+          raiserror('(2) trig error STOP ad hoc',16,3,@@nestlevel);
+      end
+    -- use throw outside catch block
+    if (@id = 3) throw 123456, '(3) p1 try throw', 2;  
+    -- this (nothing after a raiserror or throw in block) will execute
+    if (@id in (1,2)) raiserror('(%d in 1,2) trig try invoke catch fails after failed action',16,3, @Id);  
+    if (@id in (4,5)) raiserror('(%d in 4,5) trig invoke catch when no failed action',10,3,@Id);
+    -- > 5 goes on it's way happy
+  end try
+  begin catch    
+    if (@id = 1) raiserror('(1) do not stop ad hoc unless',0,4, @Id);
+    if (@id = 2) raiserror('(2) catch try STOP ad hoc here',16,4, @Id);
+    if (@id <= 5) and (@@nestlevel <= 2) raiserror('(%d) trig catch after ad hoc errors handled',0,4,@Id);
+    rollback;
+    if (@id > 5) or (@@nestlevel > 2) 
+        raiserror('(%d) trig catch after rollback before throw',16,4,@Id);
+    -- throw last raised error in try block if not already handled
+    throw;
+    -- nothing after throw will ever execute
+    if (@id = 5) raiserror('(5) trig catch after throw',0,4);
+  end catch
+  raiserror('(%d) complete execution with no exception',0,5,@Id);
+end
+GO 
+create procedure p1
+ (@id int = NULL)
+as
+begin
+  raiserror('p1 nestlevel %d',0,0, @@nestlevel);
+  if @id = 1 raiserror('p1 catch before try-catch block',16,1);
+  begin try
+    -- fail BEFORE insert if 1
+    if @id in (1,2) raiserror('(1,2) p1 try error before insert',16,1);
+    -- fail at insert if null
+    insert t1 (id) values (@id);
+    -- fail AFTER insert if 2
+    if @id = 2 raiserror('(2) p1 try error after insert',16,1);
+  end try
+  begin catch
+    -- fail in catch if 3
+    if @id = 3 raiserror('p1 catch before throw',16,1);
+    -- throw if not bottom of call stack 
+    if @@nestlevel > 1 throw;
+    --nothin after throw ever executes
+    if @id = 4 raiserror('p1 catch after throw',16,1);
+  end catch;
+end;
+go
+create procedure p2
+ (@id int = NULL)
+as
+begin
+  raiserror('p2 nestlevel %d',0,0, @@nestlevel);
+  if @id = 1 raiserror('p2 catch before try-catch block',16,1);
+  begin try
+    if @id in (1,2) raiserror('(1,2) p2 try before call',16,1);
+    -- fail in call if null
+    EXEC p1 @id;
+    if @id = 2 raiserror('(2) p2 try after insert',16,1);
+  end try
+  begin catch
+    -- fail in catch if 3
+    if @id in (1,2,3) raiserror('p2 catch before throw',16,1);
+    -- throw if not bottom of call stack 
+    if @@nestlevel > 1 throw;
+    --nothin after throw ever executes
+    if @id = 4 raiserror('p2 catch after throw',16,1);
+  end catch;
+  if @id = 4 raiserror('p2 catch after throw',16,1);
+  if @id = 4 raiserror('p1 catch after throw',16,1);
+end;
+go
 
+insert t1 (id) values (NULL);
+go
+insert t1 (id) values (1);
+go
+insert t1 (id) values (2);
+go
+insert t1 (id) values (3);
+go
+insert t1 (id) values (4);
+go
+insert t1 (id) values (5);
+go
+insert t1 (id) values (6);
+go
+select id from t1
+go
+truncate table t1
+go
+exec p1 NULL;
+go
+exec p1 1;
+go
+exec p1 2;
+go
+exec p1 3;
+go
+exec p1 4;
+go
+exec p1 5;
+go
+exec p1 6;
+go
+select id from t1
+go
+truncate table t1
+go
+exec p2 NULL;
+go
+exec p2 1;
+go
+exec p2 2;
+go
+exec p2 3;
+go
+exec p2 4;
+go
+exec p2 5;
+go
+exec p2 6;
+go
+select id from t1
+go
+if object_id('t1', 'U') is not null
+  drop table t1;
+go
+if object_id('p1', 'P') is not null
+  drop proc p1;
+go
+if object_id('p2', 'P') is not null
+  drop proc p2;
+
+-----
+---
 IF 1=2
   SELECT '' AS [eha.BackupActivity], * FROM eha.BackupActivity;
   SELECT '' AS [eha.Bookings], * FROM eha.Bookings;

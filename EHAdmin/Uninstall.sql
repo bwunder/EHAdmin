@@ -1,14 +1,6 @@
 -- UNINSTALL
-
--- cleans out container's recycle bin but not real files!?
---:!!if exist X:\ DEL X:\*.* /Q /S 
---:!!if exist X:\ DIR X:\*.* /N /Q /R /S
 SET NOCOUNT ON;
 USE ehdb;
-
-IF NOT EXISTS (SELECT * FROM sys.server_audits 
-                WHERE name = 'ehaSchemaAudit' ) 
-  DROP SERVER AUDIT ehaSchemaAudit;
 IF EXISTS ( SELECT * 
             FROM sys.server_event_notifications
             WHERE name = 'DDLChangesSrv' )
@@ -23,8 +15,15 @@ IF FILE_ID('ehdb_filetables') IS NOT NULL
   ALTER DATABASE ehdb REMOVE FILE ehdb_filetables;
 
 USE master;
-DROP DATABASE ehdb;
-
+IF DB_ID('ehdb') IS NOT NULL 
+  DROP DATABASE ehdb;
+IF EXISTS (SELECT * FROM sys.server_audits
+           WHERE name = 'ehaSchemaAudit' ) 
+  BEGIN
+    ALTER SERVER AUDIT ehaSchemaAudit 
+    WITH (STATE = OFF);
+    DROP SERVER AUDIT ehaSchemaAudit;
+  END
 DECLARE @Message_Id INT, @MaxId INT;
 SET @Message_Id = 2147483600 -- MESSAGE_OFFSET
 SET @MaxId = @Message_Id + 47 
@@ -42,7 +41,10 @@ DROP MASTER KEY;
 
 EXEC sp_droplinkedsrvlogin 'OffsiteLinkedServer', NULL;
 EXEC sp_dropserver 'OffsiteLinkedServer';
-
+GO
+:!!if exist X:\ DIR X:\*.* /N /Q /R /S
+-- cleans out container's recycle bin but not real files!?
+--:!!if exist X:\ DEL X:\*.* /Q /S 
 -- dismount the truecrypt container if desired
 --:!!if exist X:\ "I:\TrueCrypt.exe" /q /s /d X /f)\
-
+GO

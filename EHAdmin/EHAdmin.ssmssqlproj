@@ -27,6 +27,18 @@
           <ConnectionProtocol>NotSpecified</ConnectionProtocol>
           <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
         </ConnectionNode>
+        <ConnectionNode Name="BILL764\R2:BILL764\bwunder">
+          <Created>2012-01-09T08:13:26.6835452-07:00</Created>
+          <Type>SQL</Type>
+          <Server>BILL764\R2</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
         <ConnectionNode Name="BILL764\rc0:BILL764\bwunder">
           <Created>2011-12-05T17:47:57.0059506-07:00</Created>
           <Type>SQL</Type>
