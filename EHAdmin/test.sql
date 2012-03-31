@@ -27,6 +27,7 @@ DECRYPTION BY CERTIFICATE ValueCertificate;
 CLOSE ALL SYMMETRIC KEYS;
 */
 --
+
 use testdb
 if object_id('t1', 'U') is not null
   drop table t1;
@@ -39,154 +40,261 @@ if object_id('p2', 'P') is not null
 go
 create table t1 (id int primary key);
 go
---drop trigger trig_t1 
+--drop trigger trig_t1
+go 
 create trigger trig_t1 on t1
 instead of insert
 as
 begin
-declare @id int; 
+  declare @id int, @msg varchar(50); 
   set @id = (select i.id 
              from inserted as i 
              left join deleted as d 
              on i.id = d.id where d.id is null)  
-  if @@nestlevel <= 2
-    begin 
-      if @id = 1 
-        raiserror('(%d) trig no error before try-catch is ad hoc will continue',0,3,@id);
+  print formatmessage('trig:start (id=%d,nestlevel=%d,trancount=%d)',@id,@@nestlevel, @@trancount);
+    begin try
+      print '   trig:try:begin'
+      -- fail if ad hoc
+      if @@nestlevel = 1
+      -- id filter for testing only
+      and @id = 1 
+        throw 123111,'  trig:try:fail qualified ad hoc before insert',@id;
+      if (@id = 3) 
+        begin
+          -- throw with no parms will not even compile here if not dynamic
+          print '     trig:try:try catch fatal to the batch error in catch';
+          exec sp_executesql N'print ''       trig:try:dynamicsql:throw''; throw;';
+        end
+      if (@id = 5) 
+        throw 123555,'      trig:try: insert and throw id on floor in catch',@id;
       else
-        raiserror('(2) trig error before try-catch is ad hoc will raise fatal error',16,3);
-    end
-  begin try
-    -- fail if ad hoc
-    if @@nestlevel <= 2
-      begin 
-        if @id = 1 
-          raiserror('(1) trig no error in try do not stop ad hoc',0,3,@@nestlevel);
-        else
-          raiserror('(2) trig error STOP ad hoc',16,3,@@nestlevel);
-      end
-    -- use throw outside catch block
-    if (@id = 3) throw 123456, '(3) p1 try throw', 2;  
-    -- this (nothing after a raiserror or throw in block) will execute
-    if (@id in (1,2)) raiserror('(%d in 1,2) trig try invoke catch fails after failed action',16,3, @Id);  
-    if (@id in (4,5)) raiserror('(%d in 4,5) trig invoke catch when no failed action',10,3,@Id);
-    -- > 5 goes on it's way happy
-  end try
-  begin catch    
-    if (@id = 1) raiserror('(1) do not stop ad hoc unless',0,4, @Id);
-    if (@id = 2) raiserror('(2) catch try STOP ad hoc here',16,4, @Id);
-    if (@id <= 5) and (@@nestlevel <= 2) raiserror('(%d) trig catch after ad hoc errors handled',0,4,@Id);
-    rollback;
-    if (@id > 5) or (@@nestlevel > 2) 
-        raiserror('(%d) trig catch after rollback before throw',16,4,@Id);
-    -- throw last raised error in try block if not already handled
-    throw;
-    -- nothing after throw will ever execute
-    if (@id = 5) raiserror('(5) trig catch after throw',0,4);
+        begin
+          print '     trig:try:insert'
+          insert t1 values (@id); -- 2,4,6,8,9,10
+        end
+
+      if (@id = 7) 
+        throw 123777,'      trig:try:fatal to the batch after insert',@id;
+      -- duplicate key
+      if (@id = 9) 
+        begin
+          begin try
+            print '     trig:try:duplicate insert'
+            insert t1 values (9) 
+          end try
+          begin catch
+            throw 123999,'      trig:try:trap and map/mask fatal to batch error in try',@id;
+          end catch
+      -- only see it no problems
+        end
+      print '   trig:try:end'
+    end try
+    begin catch    
+      print '   trig:catch:begin trancount=' + cast(@@trancount as nvarchar(11));  
+      set @msg = formatmessage('      %d, sev: %d, lvl: %d proc: %s line %d msg: %s'
+                              ,ERROR_NUMBER(),ERROR_SEVERITY(),ERROR_STATE()
+                              ,ISNULL(ERROR_PROCEDURE(),'ad hoc'),ERROR_LINE()
+                              ,CAST(ERROR_MESSAGE() AS NVARCHAR(500)));  
+      if (ERROR_NUMBER() = 123111)
+          throw 456111,'      trig:catch:ad hoc',@Id;
+      if (ERROR_NUMBER() = 123333)
+          begin
+            begin try 
+              throw 456333,'      trig:catch:try:throw',@Id;
+            end try
+            begin catch
+              raiserror('     trig:catch:catch:all your base are belong to us',0,0)
+            end catch           
+          end
+      if (ERROR_NUMBER() = 123555) 
+        raiserror('     trig:catch:kilroy was here',0,0);    
+      else
+        begin
+          while @@trancount > 0 
+            begin
+              print '     trig:catch:rollback';
+              rollback;
+            end
+          if (ERROR_NUMBER() = 123777)
+              throw 456777,'      trig:catch:between rollback and throw',@id;
+          else
+            begin
+              print '     trig:catch:throw';    
+              throw;
+            end        
+        end
+    -- if you see this with rowcount of 0 id was not inserted and error was not logged
+    print '   trig:catch:end no insert and data lost if you see this';
   end catch
-  raiserror('(%d) complete execution with no exception',0,5,@Id);
+  print formatmessage('trig:end ( id=%d,nestlevel=%d,trancount=%d)',@id,@@nestlevel, @@trancount);
 end
 GO 
 create procedure p1
  (@id int = NULL)
 as
 begin
-  raiserror('p1 nestlevel %d',0,0, @@nestlevel);
-  if @id = 1 raiserror('p1 catch before try-catch block',16,1);
+  print formatmessage('p1:start (id=%d,nestlevel=%d,trancount=%d)',@id,@@nestlevel, @@trancount);
   begin try
-    -- fail BEFORE insert if 1
-    if @id in (1,2) raiserror('(1,2) p1 try error before insert',16,1);
-    -- fail at insert if null
-    insert t1 (id) values (@id);
-    -- fail AFTER insert if 2
-    if @id = 2 raiserror('(2) p1 try error after insert',16,1);
+    print 'p1:try:begin';
+    -- will fail at insert if null
+      insert t1 (id) values (@id);
+    -- fail on insert if 3 with a duplicate key insert
+    print 'p1:try:end';
   end try
   begin catch
-    -- fail in catch if 3
-    if @id = 3 raiserror('p1 catch before throw',16,1);
-    -- throw if not bottom of call stack 
-    if @@nestlevel > 1 throw;
-    --nothin after throw ever executes
-    if @id = 4 raiserror('p1 catch after throw',16,1);
+    print 'p1:catch:begin';
+    throw;
+    print 'p1:catch:end';
   end catch;
+  print formatmessage('p1:end (id=%d,nestlevel=%d,trancount=%d)',@id,@@nestlevel, @@trancount);
 end;
 go
 create procedure p2
  (@id int = NULL)
 as
 begin
-  raiserror('p2 nestlevel %d',0,0, @@nestlevel);
-  if @id = 1 raiserror('p2 catch before try-catch block',16,1);
+  print formatmessage('p2:start (id=%d, nestlevel=%d)',@id,@@nestlevel);
   begin try
-    if @id in (1,2) raiserror('(1,2) p2 try before call',16,1);
-    -- fail in call if null
-    EXEC p1 @id;
-    if @id = 2 raiserror('(2) p2 try after insert',16,1);
+    print 'p2:try:begin';
+      EXEC p1 @id;
+    print 'p2:try:end';
   end try
   begin catch
-    -- fail in catch if 3
-    if @id in (1,2,3) raiserror('p2 catch before throw',16,1);
-    -- throw if not bottom of call stack 
-    if @@nestlevel > 1 throw;
-    --nothin after throw ever executes
-    if @id = 4 raiserror('p2 catch after throw',16,1);
+    print 'p2:catch:begin';
+    throw;
+    print 'p2:catch:end (after throw)';
   end catch;
-  if @id = 4 raiserror('p2 catch after throw',16,1);
-  if @id = 4 raiserror('p1 catch after throw',16,1);
+  print formatmessage('p2:end (id=%d, nestlevel=%d)',@id,@@nestlevel);
 end;
 go
-
-insert t1 (id) values (NULL);
+truncate table t1
 go
-insert t1 (id) values (1);
+declare @id int;
+set @id = 1;
+while @id <= 10
+  begin
+    print formatmessage('---- insert t1 (id) values (%d) ----',@id)
+    begin try
+      begin transaction
+        insert t1 (id) values (@id);
+        -- simulate a dup key 
+        -- if in a txn both will rollback
+        if @id = 6
+          insert t1 (id) values (@id);
+      commit transaction
+    end try
+    begin catch
+      while @@trancount > 0
+        rollback transaction
+      print formatmessage('--> messsage returned to nestlevel %d',@@nestlevel)
+      print formatmessage('%d, sev: %d, lvl: %d proc: %s on line %d'
+                         ,ERROR_NUMBER(),ERROR_SEVERITY(),ERROR_STATE()
+                         ,ISNULL(ERROR_PROCEDURE(),'ad hoc'),ERROR_LINE());
+      print formatmessage('%s',ERROR_MESSAGE())
+    end catch
+    print '------------------------------------'
+    print ''
+    set @id += 1 
+  end
 go
-insert t1 (id) values (2);
-go
-insert t1 (id) values (3);
-go
-insert t1 (id) values (4);
-go
-insert t1 (id) values (5);
-go
-insert t1 (id) values (6);
-go
+print '<<<<<<<<< select id from t1 >>>>>>>>'
 select id from t1
+              print '------------------------------------'
+print formatmessage('<<<<    rowcount: %2.0d         >>>>',@@rowcount)
+print ''
 go
 truncate table t1
 go
-exec p1 NULL;
+select * from sys.dm_exec_tasks
+-- this shows that dynamicsql is does count as a nestlevel bummer!
+-- and that the trigger still traps all errors
+-- 1 will be inserted but the duplicate key for 6 still prevents insert
+declare @id int;
+set @id = 1;
+while @id <= 10 -- recall this failed above
+  begin
+    print formatmessage('---- insert t1 (id) values (%d) ----',@id)
+    -- avoid fatal to the batch errors that interrupt the test script output
+    begin try
+      begin transaction
+        exec sp_executesql N'insert t1 (id) values (@id)',N'@id int',@id;
+        -- simulate a dup key 
+        -- if in a txn both will rollback
+        if @id = 6
+          exec sp_executesql N'insert t1 (id) values (@id)',N'@id int',@id;
+      commit transaction
+    end try
+    begin catch
+      while @@trancount > 0
+        rollback transaction
+      print formatmessage('--> messsage returned to nestlevel %d',@@nestlevel)
+      print formatmessage('%d, sev: %d, lvl: %d proc: %s on line %d'
+                         ,ERROR_NUMBER(),ERROR_SEVERITY(),ERROR_STATE()
+                         ,ISNULL(ERROR_PROCEDURE(),'ad hoc'),ERROR_LINE());
+      print formatmessage('%s',ERROR_MESSAGE())
+    end catch
+    print '------------------------------------'
+    print ''
+    set @id += 1 
+  end
 go
-exec p1 1;
-go
-exec p1 2;
-go
-exec p1 3;
-go
-exec p1 4;
-go
-exec p1 5;
-go
-exec p1 6;
-go
+print '<<<<<<<<< select id from t1 >>>>>>>>'
 select id from t1
+              print '------------------------------------'
+print formatmessage('<<<<    rowcount: %2.0d         >>>>',@@rowcount)
+print ''
 go
 truncate table t1
 go
-exec p2 NULL;
+declare @id int;
+set @id = 1;
+while @id <= 10
+  begin
+    print '------------------------------------'
+    print formatmessage('----        exec p1 %d          ----',@id)
+    -- avoid fatal to the batch errors that interrupt the test script output
+    begin try
+      exec p1 @id;
+    end try
+    begin catch
+      print '--> last messsage from p1 call'
+      print formatmessage('%d, sev: %d, lvl: %d proc: %s on line %d'
+                         ,ERROR_NUMBER(),ERROR_SEVERITY(),ERROR_STATE()
+                         ,ISNULL(ERROR_PROCEDURE(),'ad hoc'),ERROR_LINE());
+      print formatmessage('%s',ERROR_MESSAGE())
+    end catch
+    print '-----------------------------------'
+    print ''
+    set @id += 1 
+  end
 go
-exec p2 1;
-go
-exec p2 2;
-go
-exec p2 3;
-go
-exec p2 4;
-go
-exec p2 5;
-go
-exec p2 6;
-go
+print '<<<<<<<<<<select id from t1>>>>>>>>>'
 select id from t1
+print '<<-------------------------------->>'
+print ''
+go
+truncate table t1
+go
+declare @id int;
+set @id = 1;
+while @id <= 10
+  begin
+    print formatmessage('-----------exec p2 %d------------',@id)
+    -- avoid fatal to the batch errors that interrupt the test script output
+    begin try
+      exec p2 @id;
+    end try
+    begin catch
+      print '--> last messsage from p2 call'
+      print formatmessage('%d, sev: %d, lvl: %d proc: %s on line %d'
+                         ,ERROR_NUMBER(),ERROR_SEVERITY(),ERROR_STATE()
+                         ,ISNULL(ERROR_PROCEDURE(),'ad hoc'),ERROR_LINE());
+      print formatmessage('%s',ERROR_MESSAGE())
+    end catch
+    print '-----------------------------------'
+    print ''
+    set @id += 1 
+  end
 go
 if object_id('t1', 'U') is not null
   drop table t1;
@@ -196,9 +304,9 @@ if object_id('p1', 'P') is not null
 go
 if object_id('p2', 'P') is not null
   drop proc p2;
-
------
----
+go
+-----------------------------------------------------
+----
 IF 1=2
   SELECT '' AS [eha.BackupActivity], * FROM eha.BackupActivity;
   SELECT '' AS [eha.Bookings], * FROM eha.Bookings;
