@@ -1,4 +1,5 @@
--- UNINSTALL
+-- UNINSTALL spoke
+-- uninstall for hub is drop database
 SET NOCOUNT ON;
 USE ehdb;
 IF EXISTS ( SELECT * 

@@ -1,14 +1,14 @@
 :on error exit
 -------------------------------------------------------------------------------
--- Encryption Hierarchy Administration  
+-- Encryption Hierarchy Administration Spoke  
 -------------------------------------------------------------------------------
 -- Pre-requisites 
---  1. SQL Server 2012 (script developed and tested using RC0/WIN7)
---  2. Mountable TrueCrypt virtual disk file (see http://www.truecrypt.org)
---  3. Usable ODBC System DSN to the offsite database
--- Othere Important Notes:
+--  1. SQL Server 2012 RTM (SQL Express not well suited)
+--  2. Mount-able TrueCrypt virtual disk file (see http://www.truecrypt.org)
+--  3. Usable ODBC System DSN to hub database
+-- Other Important Notes:
 --  1. Use this script in SSMS using SQLCMD mode only. 
---  2. Replace template tokens 
+--  2. ALWAYS replace template tokens with your secrets.  
 --  3. NEVER save this script once the secrets have been entered. 
 --  4. Give the SQL Server Database Engine's service account full control of the 
 --     virtual disk Container's folder and the mounted virtual disk. Include 
@@ -33,7 +33,8 @@
 --     required for TDE, Change Data Capture, SPARSE, FILESTREAM
 -- 12. SQL Server 2012 required for FileTable, declaration constant assignment, 
 --     THROW, FORMATMESSAGE usage, SHA2_512 algorithm, ALTER ROLE-ADD MEMBER, 
---     AES SMK encryption,
+--     AES SMK encryption
+-- 13. FILESTREAM requires a full SQLExpress install - (localdb)v11.0 will not work
 -------------------------------------------------------------------------------
 SET NOCOUNT ON;
 -- SQLCMD variable assignment not in trace output 
@@ -71,7 +72,7 @@ SET NOCOUNT ON;
 :setvar EHDB_DMK_BACKUP_PHRASE                 "Ru&6Gf%3F e6LOUD@wc?f"  -- "<[EHDB_DMK_BACKUP_PHRASE],PASSPHRASE*,Ru&6Gf%3F e6LOUD@wc?f>"                 
 :setvar EHDB_DMK_ENCRYPTION_PHRASE             "Memorize this 1 4 sure!"-- "<[EHDB_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Memorize this 1 4 sure!>"           
 :setvar ERROR_SYMMETRIC_KEY                    "ErrorKey"               -- "<[ERROR_SYMMETRIC_KEY],SYSNAME,ErrorKey>"                                     
-:setvar ERROR_KEY_ENCRYPTION_ALGORITHM         "AES_128"                -- "<[ERROR_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_128>"                           
+:setvar ERROR_KEY_ENCRYPTION_ALGORITHM         "AES_256"                -- "<[ERROR_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_256>"                           
 :setvar ERROR_KEY_ENCRYPTION_PHRASE            "Yu&6Gf %3Fe13FZRE@wc?f" -- "<[ERROR_KEY_ENCRYPYION_PHRASE],PASSPHRASE*,Yu&6Gf %3Fe13FZRE@wc?f>"           
 :setvar ERROR_KEY_SOURCE                       "i$Db8d b vf989sb d&ubsG"-- "<[ERROR_KEY_SOURCE_PHRASE],PASSPHRASE*,i$Db8d b vf989sb d&ubsG>"              
 :setvar ERROR_KEY_IDENTITY                     "t {bleS*&(d84vr4 67vfes"-- "<[ERROR_KEY_IDENTITY],PASSPHRASE*,t {bleS*&(d84vr4 67vfes>"                   
@@ -145,7 +146,7 @@ SET NOCOUNT ON;
 :setvar OFFSITE_ACTIVITY_TABLE                 "OffsiteActivity"       
 :setvar REPORT_ACTIVITY_TABLE                  "ReportActivity"        
 
-:setvar OBJECT_COUNT                           "61"                    
+:setvar OBJECT_COUNT                           "62"                    
 :setvar TABLE_COUNT                            "10"                    
 --- Other CONFIGURATION
 :setvar EVENT_NOTIFICATION                     "DDLChanges"            
@@ -175,8 +176,7 @@ IF NOT EXISTS (SELECT *
                                      , @rmtuser = N'$(LINK_USER)'
                                      , @rmtpassword='$(LINK_PASSWORD)';
 GO
--- if truecyrpt cannot dismount any existing vhd the script will stop
-
+-- if truecyrpt cannot dismount any existing drive $(VHD_LETTER) the script will stop
 :!!if exist $(VHD_LETTER):\ "$(TRUECRYPT_EXE)" /q /s /d X /f)\           
 ----:!!if exist $(FILETABLE_MAPPED_DRIVE_LETTER):\ net use $(FILETABLE_MAPPED_DRIVE_LETTER): /DELETE
 GO
@@ -184,7 +184,6 @@ GO
 :!!$(TRUECRYPT_EXE) /v $(KEY_CONTAINER_PATH)$(KEY_CONTAINER_FILE) /l$(VHD_LETTER) /p "$(TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE)" /q /s /m
 ----:!!net use $(FILETABLE_MAPPED_DRIVE_LETTER): \\$(SQL_SERVER_AND_INSTANCE)
 GO
-
 --copy /Y I:\Empty.eha /B $(KEY_CONTAINER_PATH)$(KEY_CONTAINER_FILE) /B
 -- cleanup -- only when corrupted - drop database or ALTER DATABASE DROP FILE is better for FILESTREAM
 --:!!if exist $(VHD_LETTER):\$(FILESTREAM_FILE) RMDIR $(VHD_LETTER):\$(FILESTREAM_FILE) /S /Q
@@ -201,21 +200,23 @@ IF NOT EXISTS( SELECT *
                WHERE name = ORIGINAL_LOGIN() 
                AND type = 'U'
                AND IS_SRVROLEMEMBER('sysadmin') = 1 )
-  RAISERROR('Only a Windows authenticated member of the sysadmin fixed server role should execute this script.',16, 1);
+  RAISERROR('A Windows authenticated member of the sysadmin fixed server role must execute this script.',16, 1);
 GO      
 IF ISNULL(PARSENAME ( CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion')) , 4 ), 0) < 11
-  RAISERROR('SQL Server 2012 is required. See script header notes for details.',16, 1);
+  RAISERROR('SQL Server 2012 is required. See script header notes.',16, 1);
 GO
 -- self-signed certificates are easier prey for authentication relay exploits (aka man in the middle)
 IF (SELECT UPPER(encrypt_option) FROM sys.dm_exec_connections WHERE session_id = @@spid) = 'FALSE'
-  RAISERROR('Unencrypted connections increase the risk of parameter and returned data exposure on the network.  see http://msdn.microsoft.com/en-us/library/ms191192.aspx' ,0 ,0);
+  RAISERROR('Unencrypted connections increase the risk of data exposure on the wire.  see http://msdn.microsoft.com/en-us/library/ms191192.aspx' ,0 ,0);
 GO
+-- Configure filestream at install or in SQL Configuration Manger
+-- Enable the configuration using sp_configure 'filestream access level', 2; RECONFIGURE;
 IF NOT EXISTS ( SELECT * FROM sys.configurations 
                 WHERE name = 'filestream access level'
                 AND value = 2)
-  RAISERROR('FILESTREAM for Transact-SQL and Win32 streaming access must be enabled in SQL Server Configuration Manager.',16, 1);
+  RAISERROR('FILESTREAM for Transact-SQL and Win32 streaming access must be configured and enabled.',16, 1);
 GO
-RAISERROR('Confirm that no device or software has captured your PASSPHRASEs  see http://wskills.blogspot.com/2007/01/how-to-find-fight-keyloggers.html and http://msdn.microsoft.com/en-us/library/ff648641.aspx',0,0);
+RAISERROR('Verify that no key-logging device or software has captured your PASSPHRASEs  see http://wskills.blogspot.com/2007/01/how-to-find-fight-keyloggers.html and http://msdn.microsoft.com/en-us/library/ff648641.aspx',0,0);
 GO
 IF NOT ($(MESSAGE_OFFSET) BETWEEN 500 AND 21474836)
   RAISERROR('MESSAGE_OFFSET must be between 500 and 21474836.',16, 1);
@@ -223,7 +224,7 @@ GO
 --  only TDE capable - e.g. Developer, Enterprise, and Data Center SKUs
 IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0 
   BEGIN
-    -- Certificate in master for TDE encrypted by master DMK (which is encrypted by the SMK(which is encrypted by the DPAPI)) 
+    -- Certificate in master for TDE encrypted by master DMK (which is encrypted by the SMK (DPAPI)) 
     IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE symmetric_key_id = 101)
       CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$(master_DMK_ENCRYPTION_PHRASE)';
     IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(TDE_CERTIFICATE)')
@@ -259,12 +260,14 @@ GO
 -- sys.dm_exec_query_stats also some risk that leaving an idle database 
 -- online presents a better learning opportunity for the uninvited - this db should be idle most of 
 -- the time so no need to leave the compiled queries In Cache until they age out. The procedure cache is
--- cleared when the db closes (when last user disconnectes). AUTO_CLOSE will also provide a backup 
+-- cleared when the db closes (when last user disconnects). AUTO_CLOSE will also provide a failsafe 
 -- to assure the master key is closed if it somehow is left open leaving the session vulnerable 
 -- if hijacked in an elevation of authority attack 
+-- setting the UI to auto disconnect from the database after each execution is also worth considering
+-- In a busy database AUTO_CLOSE offers no real advantage, just creates an ocassional very slow connection to open. 
 ALTER DATABASE $(EHDB) SET AUTO_CLOSE ON;    
 GO
--- intended for use only by mad scientists at M$ labs and the catatonically insane 
+-- intended for use only by mad scientists at M$ labs and the catatonically insane me thinks
 ALTER DATABASE $(EHDB) SET TRUSTWORTHY OFF;    
 GO
 -- prevents elevation of authority attacks by users connected to other databases within the SQL Server 
@@ -334,7 +337,7 @@ IF IS_MEMBER('$(EHADMIN_ROLE)') <> 1
     EXEC sp_executesql @AddToRoleDDL;
   END  
 GO
-IF KEY_GUID('#(SESSION_SYMMETRIC_KEY)') is NULL
+IF KEY_GUID('$(SESSION_SYMMETRIC_KEY)') is NULL
   CREATE SYMMETRIC KEY $(SESSION_SYMMETRIC_KEY)
   WITH ALGORITHM = AES_256
      , KEY_SOURCE = 'Encryption Hierarchy Administration Transport Encryption'
@@ -425,18 +428,18 @@ IF NOT EXISTS (SELECT *
                FROM sys.symmetric_keys 
                WHERE name = '$(ERROR_SYMMETRIC_KEY)')
 	CREATE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY) 
-  WITH ALGORITHM = $(ERROR_KEY_ENCRYPTION_ALGORITHM)
+    WITH ALGORITHM = $(ERROR_KEY_ENCRYPTION_ALGORITHM)
      , KEY_SOURCE = '$(ERROR_KEY_SOURCE)'
      , IDENTITY_VALUE =  '$(ERROR_KEY_IDENTITY)'
 	ENCRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
 GO
+-- audit certificate is independent FROM DMK 
 IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(AUDIT_CERTIFICATE)')
   CREATE CERTIFICATE $(AUDIT_CERTIFICATE) 
 	ENCRYPTION BY PASSWORD = '$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)'
-  WITH SUBJECT = 'Encryption Hieararchy Administrator Audit Trail';
+  WITH SUBJECT = 'Encryption Hierarchy Administrator Audit Trail';
 GO
--- audit certificate is independent FROM DMK 
--- even so is sticky to instance without first exporting public & private key 
+-- audit key is sticky to the database 
 IF NOT EXISTS (SELECT * 
                FROM sys.symmetric_keys 
                WHERE name = '$(AUDIT_SYMMETRIC_KEY)')
@@ -460,9 +463,9 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)') IS NULL
   BEGIN
 	   CREATE TABLE $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
 		    ( Id UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL
-          CONSTRAINT dft_$(BOOKINGS_TABLE)__Id
-          DEFAULT NEWSEQUENTIALID()
-        , ServerName NVARCHAR(128) NOT NULL
+              CONSTRAINT dft_$(BOOKINGS_TABLE)__Id
+              DEFAULT NEWSEQUENTIALID()
+            , ServerName NVARCHAR(128) NOT NULL
 		      CONSTRAINT dft_$(BOOKINGS_TABLE)__ServerName
 		      DEFAULT (@@SERVERNAME)
 		    , ProcId INT NULL
@@ -520,43 +523,43 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
 		      CONSTRAINT dft_$(BACKUP_ACTIVITY_TABLE)__ServerName
 		      DEFAULT (@@SERVERNAME)
 		    , DbName NVARCHAR(128) NOT NULL
-        , Node HIERARCHYID NULL 
-        , Level AS Node.GetLevel() PERSISTED 
+            , Node HIERARCHYID NULL 
+            , Level AS Node.GetLevel() PERSISTED 
 		    , NodeName NVARCHAR (128) NOT NULL
 		    , BackupName VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',896,1)=964-- NVARCHAR(448)
 		    , BackupNameBucket INT NOT NULL 
-        , UseHash BIT NOT NULL          
+            , UseHash BIT NOT NULL          
 		    , BackupPath VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',2048,1)=2116-- NVARCHAR(1024)
 		    , BackupPhraseVersion SMALLINT NOT NULL
 		    , KeyPhraseVersion SMALLINT NULL
-        , Colophon INT NOT NULL  -- checksum of the hash of key guids and cert thumbprints- not presumed unique
-        , Edition SMALLINT NOT NULL  -- the number of backups made for the current Colophon       
+            , Colophon INT NOT NULL  -- checksum of the hash of key guids and cert thumbprints- not presumed unique
+            , Edition SMALLINT NOT NULL  -- the number of backups made for the current Colophon       
 		      CONSTRAINT dft_$(BACKUP_ACTIVITY_TABLE)__Version 
 		      DEFAULT (1)
-        , MAC VARBINARY (128) NOT NULL
+            , MAC VARBINARY (128) NOT NULL
 		    , Action VARCHAR (30) NOT NULL
 		    , Status VARCHAR (30) NOT NULL
-          CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__Status 
-          CHECK (Status IN ( 'Complete'
-                           , 'Error'
-                           , 'Instead'
-                           , 'Offsite' ) ) 
-        , CipherType CHAR (2) NOT NULL
-          CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__CipherType 
-          CHECK (CipherType IN ( 'A1'   -- AES 128 
-                               , 'A2'   -- AES 192
-                               , 'A3'   -- AES 256 (all Denali DPAPI?)
-                               , 'AK'   -- asymmetric key
-                               , 'D3'   -- Triple DES (all Katmai & Yukon DPAPI?)
-                               , 'DT'   -- Triple DES 3KEY
-                               , 'NA'   -- EKM or private key has been dropped
-                               , 'MK'   -- database master key
-                               , 'PW'   -- passphrase
-                               , 'SK'   -- symmetric key
-                               , 'SM'   -- service master key
-                               , 'SP'   -- service master key AND passphrase
-                               , '' ) ) -- undetermined
-        , ErrorData VARBINARY(8000) SPARSE NULL
+              CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__Status 
+              CHECK (Status IN ( 'Complete'
+							   , 'Error'
+							   , 'Instead'
+							   , 'Offsite' ) ) 
+            , CipherType CHAR (2) NOT NULL
+              CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__CipherType 
+              CHECK (CipherType IN ( 'A1'   -- AES 128 
+								   , 'A2'   -- AES 192
+								   , 'A3'   -- AES 256 (all Denali DPAPI?)
+								   , 'AK'   -- asymmetric key
+								   , 'D3'   -- Triple DES (all Katmai & Yukon DPAPI?)
+								   , 'DT'   -- Triple DES 3KEY
+								   , 'NA'   -- EKM or private key has been dropped
+								   , 'MK'   -- database master key
+								   , 'PW'   -- passphrase
+								   , 'SK'   -- symmetric key
+								   , 'SM'   -- service master key
+								   , 'SP'   -- service master key AND passphrase
+								   , '' ) ) -- undetermined
+	        , ErrorData VARBINARY(8000) SPARSE NULL
 		    , CreateUTCDT DATETIME NOT NULL
 		      CONSTRAINT dft_$(BACKUP_ACTIVITY_TABLE)__CreateUTCDT
 		      DEFAULT (SYSUTCDATETIME())
@@ -565,8 +568,8 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
 		      DEFAULT (ORIGINAL_LOGIN())   
 		    , CONSTRAINT pk_$(BACKUP_ACTIVITY_TABLE)__Id__ServerName
 		      PRIMARY KEY ( Id, ServerName )
-	      , CONSTRAINT fk_$(BACKUP_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
-	        FOREIGN KEY ( Id, ServerName ) REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)( Id, ServerName ) );
+		    , CONSTRAINT fk_$(BACKUP_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
+			  FOREIGN KEY ( Id, ServerName ) REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)( Id, ServerName ) );
     ADD SIGNATURE TO $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
     BY CERTIFICATE $(OBJECT_CERTIFICATE)
     WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
@@ -778,7 +781,7 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)') IS NULL
 	      DEFAULT (@@SERVERNAME)
       , ConversationHandle UNIQUEIDENTIFIER NOT NULL
       , ConversationGroupId UNIQUEIDENTIFIER NOT NULL
-      , Message XML NOT NULL
+      , Message VARBINARY(MAX) NOT NULL
       , Signature VARBINARY(8000) NOT NULL
       , MAC VARBINARY(128) NOT NULL
       , Action VARCHAR(30)
@@ -1022,34 +1025,20 @@ ELSE -- change tracking
     WITH (TRACK_COLUMNS_UPDATED = ON);
   END 
 GO
-EXEC sp_addmessage $(MESSAGE_OFFSET)00, 1, '%s', 'us_english','FALSE' ,'replace' -- This script
---NameValue @Parameters
-EXEC sp_addmessage $(MESSAGE_OFFSET)01, 1, '@tvp.Name = ''%s'', @tvp.Value = ''%s'' @Version = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).AddNameValue, $(EHA_SCHEMA).ValidateNameValue
-EXEC sp_addmessage $(MESSAGE_OFFSET)02, 1, '@NameBucket = %d, @Version = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).SelectNameValue
-EXEC sp_addmessage $(MESSAGE_OFFSET)03, 1, '@MAC = %s', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).CertificateBackupsByThumbprint
-EXEC sp_addmessage $(MESSAGE_OFFSET)04, 1, '@Name = ''%s'', @Value = ''%s'', @EncryptionPhrase = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).SavePrivateValue, $(EHA_SCHEMA).GetPrivateValue
-EXEC sp_addmessage $(MESSAGE_OFFSET)05, 1, '@DBName = ''%s'', @SchemaName= ''%s'', @TableName = ''%s'', @ColumnName = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).MakeSalt
-EXEC sp_addmessage $(MESSAGE_OFFSET)06, 1, '@KeyName = ''%s'', @KeyIdentity = ''%s'', @KeySource = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).SavePortableKey
-EXEC sp_addmessage $(MESSAGE_OFFSET)07, 1, '@FileName = ''%s'', @Tag = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).BackupContainer
-EXEC sp_addmessage $(MESSAGE_OFFSET)08, 1, '@ServerName = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).BackupContainer, Reports
-EXEC sp_addmessage $(MESSAGE_OFFSET)09, 1, '@Id = ''%s'', @FileName = ''%s''', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).RecallContainer
-EXEC sp_addmessage $(MESSAGE_OFFSET)10, 1, '%s has been saved.(v.%d) The private passphrase is never saved.', 'us_english','FALSE' ,'replace'
---encryption hierarchy @Parameters
-EXEC sp_addmessage $(MESSAGE_OFFSET)11, 1, '@BackupPhrase = ''%s'', @UseHash = %d, @ForceNew = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).BackupServiceMasterKey
-EXEC sp_addmessage $(MESSAGE_OFFSET)12, 1, '@IdToRestore = %d, @ForceRestore = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).RestoreServiceMasterKey
-EXEC sp_addmessage $(MESSAGE_OFFSET)13, 1, '@DbName = ''%s'', @BackupPhrase = ''%s'', @KeyPhrase = ''%s'', @UseHash = %d, @ForceNew = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).BackupDatabaseMasterKey
-EXEC sp_addmessage $(MESSAGE_OFFSET)14, 1, '@DbName = ''%s'', @IdToRestore = %d, @ForceReplace = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).RestoreDatabaseMasterKey
-EXEC sp_addmessage $(MESSAGE_OFFSET)15, 1, '@CertificateName = ''%s'', @DbName ''%s'', @BackupPhrase ''%s'', @KeyPhrase ''%s'' , @UseHash = %d, @ForceNew = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).BackupCertificate
-EXEC sp_addmessage $(MESSAGE_OFFSET)16, 1, '@CertificateName = ''%s'', @DbName ''%s'', @IdToRestore = %d', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).RestoreCertificate
 --salt name
-EXEC sp_addmessage $(MESSAGE_OFFSET)17, 1, '%s.%s.%s.%s.Salt', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).AddSalt
--- for FORMATMESSAGE of ErrorData
-EXEC sp_addmessage $(MESSAGE_OFFSET)18, 1, 'Error: %d, %d, %d Obj: %s, line: %d, msg: %s', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).AddSalt
--- encryption hierarchy backups
-EXEC sp_addmessage $(MESSAGE_OFFSET)21, 1, '%s %s %s %s %s complete.', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)22, 16, '%s %s %s %s %s failed with return_code %d.', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)23, 16, '%s %s %s %s %s failed with reason %s.', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)24, 16, 'Request for duplicate encryption hierarchy node Backup must use @ForceNew = 1 (%s %s)', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)01, 1, '%s.%s.%s.%s.Salt', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).AddSalt
+-- error EVENTDATA
+EXEC sp_addmessage $(MESSAGE_OFFSET)02, 1, 'Error: %d, %d, %d Obj: %s, line: %d, msg: %s', 'us_english','FALSE' ,'replace' -- $(EHA_SCHEMA).AddSalt
+-- completion messages
+EXEC sp_addmessage $(MESSAGE_OFFSET)10, 1, '%s has been saved.(v.%d) The private passphrase is never saved.', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)11, 1, '%s %s %s %s %s complete.', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)12, 16, '%s %s %s %s %s failed with return_code %d.', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)13, 16, '%s %s %s %s %s failed with reason %s.', 'us_english','FALSE' ,'replace'
+-- T-SQL 
+EXEC sp_addmessage $(MESSAGE_OFFSET)20, 1, 'OPEN MASTER KEY DECRYPTION BY PASSWORD = ''%s'';', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)21, 1, '$(EHA_SCHEMA).AddSalt( ''%s'', ''%s'', ''%s'', ''%s'', %s )', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)22, 1, 'SELECT @CipherType = key_algorithm, @Colophon = %s FROM master.sys.symmetric_keys WHERE name = ''%s'';', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)23, 1, 'SELECT @CipherType = pvt_key_encryption_type, @Colophon = %s FROM %s.sys.certificates WHERE name = ''%s'';', 'us_english','FALSE' ,'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)25, 1, 'USE master; BACKUP SERVICE MASTER KEY TO FILE = ''%s%s%s'' ENCRYPTION BY PASSWORD = ''%s''', 'us_english','FALSE' ,'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)26, 1, 'USE %s;%sBACKUP MASTER KEY TO FILE = ''%s%s%s'' ENCRYPTION BY PASSWORD = ''%s'';%s', 'us_english','FALSE' ,'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)27, 1, 'USE %s;%sBACKUP CERTIFICATE %s TO FILE = ''%s%s%s'' %s;%s', 'us_english','FALSE' ,'replace'
@@ -1063,14 +1052,10 @@ EXEC sp_addmessage $(MESSAGE_OFFSET)33, 16, 'Booking failure - reason: %s', 'us_
 EXEC sp_addmessage $(MESSAGE_OFFSET)34, 16, 'Authentication failure - ProcId: %d, BookingId: = [%s]', 'us_english', 'FALSE', 'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)35, 16, 'Invalid "%s" reason: %s', 'us_english', 'FALSE', 'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)36, 16, 'Authorization failure DbName: $(EHDB) Schema:$(EHA_SCHEMA): User %s  Action:%s', 'us_english', 'TRUE' , 'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)37, 16, 'ANSI_PADDING is OFF. Not suited for SQL Server encryption. See BOL', 'us_english','FALSE' ,'replace'
--- more encryption hierarchy backups
-EXEC sp_addmessage $(MESSAGE_OFFSET)43, 1, 'OPEN MASTER KEY DECRYPTION BY PASSWORD = ''%s'';', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)44, 1, '$(EHA_SCHEMA).AddSalt( ''%s'', ''%s'', ''%s'', ''%s'', %s )', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)45, 1, 'SELECT @CipherType = key_algorithm, @Colophon = %s FROM master.sys.symmetric_keys WHERE name = ''%s'';', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)46, 1, 'SELECT @CipherType = pvt_key_encryption_type, @Colophon = %s FROM %s.sys.certificates WHERE name = ''%s'';', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)37, 16, 'ANSI_PADDING must be ON for SQL Server encryption.', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)38, 16, 'Request for duplicate encryption hierarchy node Backup must use @ForceNew = 1 (%s %s)', 'us_english','FALSE' ,'replace'
 GO
--- sign messages
+-- messages
 DECLARE @InstallValues NVARCHAR(4000),@Encrypted VARBINARY(8000);
 SET @InstallValues = ':setvar KEY_CONTAINER_FILE "$(KEY_CONTAINER_FILE)"' + CHAR(13) + CHAR(10)
       + ':setvar KEY_CONTAINER_PATH "$(KEY_CONTAINER_PATH)"' + CHAR(13) + CHAR(10)
@@ -1207,7 +1192,7 @@ GO
 CREATE PROCEDURE $(EHA_SCHEMA).Book 
   ( @ProcId INT 
   , @Parameters VARBINARY(8000)
-  , @Signedreferences BIT
+  , @SchemaVerified BIT
   , @Id NCHAR(36) OUTPUT
   , @MAC VARBINARY(128) OUTPUT )
 $(WITH_OPTIONS)
@@ -1223,8 +1208,8 @@ DECLARE @Thumbprint VARBINARY(32)
                         WHERE name = '$(OBJECT_CERTIFICATE)' )
     -- maintain in lock step with schema changes and with CheckSig function
     -- by not using function here the scalar boolean function is verified 
-    -- with minimizal added code, very low cost to query sys.objects by id
-    IF (SELECT @SignedReferences                                        
+    -- with minimal code, low cost to query sys.objects by id
+    IF (SELECT @SchemaVerified                                        
         FROM sys.certificates c
         OUTER APPLY sys.fn_check_object_signatures ('CERTIFICATE', c.thumbprint) s
         INNER JOIN sys.objects o
@@ -1354,6 +1339,7 @@ DECLARE @Thumbprint VARBINARY(32)
                                      , 'GetPortableSymmetricKey'
                                      , 'GetPrivateValue'
                                      , 'MakeSalt' 
+									 , 'OpenAuditKey'
                                      , 'RecallContainer' 
                                      , 'ReportActivityHistory' 
                                      , 'ReportErrors' 
@@ -1469,7 +1455,7 @@ DECLARE @Thumbprint VARBINARY(32)
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -1486,66 +1472,37 @@ ADD SIGNATURE TO $(EHA_SCHEMA).Book
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID ('$(EHA_SCHEMA).SetAuditSession') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).SetAuditSession
+IF OBJECT_ID ('$(EHA_SCHEMA).OpenAuditKey') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).OpenAuditKey
 GO
 -------------------------------------------------------------------------------
 -- bwunder at yahoo dot com
--- Desc: Isolate audit certificate phrase maintenance. 
--- notes: 
--- This can be broken down into as little as one phrases per stored procedure
--- depending on the defined granularity for division of responsibility. Once
--- key is created it may be not be practical to prevent at least 1 DBA from 
--- knowing the phrase without adding the auditor to both the sysadmin and 
--- EHADMIN_ROLE roles to allow save and fetch of private values.
--- My preference is to have the aditor own the key via EKM but more systems 
--- lack an EKM than not. Until this changes, a non-EKM solution will be more
--- sustainable. One alternative is to have the auditor sit with the DBA to 
--- verbalize & observe the change and assure niether the query or the secrets 
--- are saved by rapidly spinning the DBA around in circles for 2 minutes after 
--- a change. The certificates encryption phrases and/or the private encrypted
--- values will be stores in NAMEVALUES encrypted by the appropriate keys and 
--- phrases in the case of private secrets.  
--- Another alternative would be to build a client that allows the auditor to 
--- change the certificate's phrase on demand by specifying the old phrase and 
--- the new phrase and a private pressing enter or train audit owner to use this 
--- proc in SQLCMD mode using SSMS from a keylogger free workstation. 
+-- Desc: secure isolation of audit certificate phrase 
+-- Better to let the auditor own the key's phrase if you have an EKM or devise 
+-- a way in the overarching build/migration strategy to provide such isolation. 
+-- A good T-SQL alternative would save the encryption phrase as a private value 
+-- (using SavePrivateValue proc). This allows the possibility of hardcoding
+-- the private phrase here yet leaving the key phrase still protected by the
+-- NAME_CERTIFICATE/VALUE_CERTIFICATE encryption chain in the NameValues table
+-- In either case division of responsibilities business rules could be automated 
+-- into the key maintenance process. 
+-- The option used here saves the key phrase as a static value in this proc to
+-- provide one-off support for division of responsibility during key rotation. 
+-- The $(WITH OPTIONS) must include ENCRYPTION in the live environment and the 
+-- live environment's phrase must not be used in any other SDLC environments. 
+-- All procs in the Book procedure's whitelist call this procedure.  
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).SetAuditKey
-  ( @Phrase1 VARBINARY(8000) = NULL 
-  , @Phrase2 VARBINARY(8000) = NULL 
-  , @PrivatePhrase VARBINARY(8000) = NULL )
+CREATE PROCEDURE $(EHA_SCHEMA).OpenAuditKey
+  ( @ProcId INT 
+  , @SchemaVerified BIT OUTPUT )
 $(WITH_OPTIONS)
 AS
 BEGIN
-DECLARE @Thumbprint VARBINARY(32);
-SET NOCOUNT ON;
-  BEGIN TRY
-    -- assure the proc is a known entity 
-    IF ( SELECT IS_OBJECTSIGNED( 'OBJECT'
-                               , object_id
-                               , 'CERTIFICATE' 
-                               , thumbprint) 
-         FROM sys.certificates
-         WHERE c.name = '$(OBJECT_CERTIFICATE)' ) = 1
-      BEGIN
-        IF 
-          BEGIN
-
-      OPEN SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)]
-      DECRYPTION BY CERTIFICATE [$(AUDIT_CERTIFICATE)]
-      WITH PASSWORD = '$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)';
-    ELSE
-      CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
-
-
-        END
-      END
-  END TRY
-  BEGIN CATCH
-    IF @@NESTLEVEL > 1
-      THROW;
-  END CATCH
+  IF @@NESTLEVEL > 1
+    SET @SchemaVerified = $(EHA_SCHEMA).VerifySchema(@ProcId);
+  OPEN SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)]
+  DECRYPTION BY CERTIFICATE [$(AUDIT_CERTIFICATE)]
+  WITH PASSWORD = '$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)';
 END
 GO
 ADD SIGNATURE TO $(EHA_SCHEMA).OpenAuditKey 
@@ -1569,25 +1526,27 @@ DECLARE @ConversationHandle UNIQUEIDENTIFIER
       , @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @MessageBody XML
+      , @MessageBody VARBINARY(MAX)
       , @MessageTypeName NVARCHAR(128)
       , @Parameters VARBINARY(8000)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT 
       , @ServiceName NVARCHAR(128)
       , @tvp NAMEVALUETYPE
-      , @Version INT; -- only for the unattended AddNameValue output parameter
+      , @Version INT; -- AddNameValue output parameter
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID
-    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+    -- assignment in the declaration fails with event 9724
+	-- 'Cannot find either column "eha" or the user-defined function or aggregate "eha.VerifySchema", or the name is ambiguous.'
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
+	SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
                                   , N''
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -1612,7 +1571,7 @@ SET NOCOUNT ON;
               @ConversationHandle = [conversation_handle]
             , @ServiceName = [service_name]
             , @MessageTypeName = [message_type_name]
-            , @MessageBody = CAST( [message_body] AS XML )
+            , @MessageBody = [message_body]
           FROM $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue
           WHERE conversation_group_id = @ConversationGroupId;
           IF @@ROWCOUNT = 1 
@@ -1622,7 +1581,7 @@ SET NOCOUNT ON;
               AND @ServiceName = '$(EVENT_NOTIFICATION)Service'
                 BEGIN
                   -- DISABLE DDL TRIGGER gets the special treatment (ENABLE is benign if already enabled)
-                  IF (@MessageBody.value('(/EVENT_INSTANCE/EventType)[1]','NVARCHAR(128)') = 'AUDIT_DATABASE_OBJECT_MANAGEMENT_EVENT')           
+                  IF ( CAST( @MessageBody AS XML ).value('(/EVENT_INSTANCE/EventType)[1]','NVARCHAR(128)') = 'AUDIT_DATABASE_OBJECT_MANAGEMENT_EVENT')           
                     ENABLE TRIGGER ALL ON DATABASE;
                   INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
                     ( Id
@@ -1638,7 +1597,7 @@ SET NOCOUNT ON;
                          , @ConversationHandle
                          , @MessageBody
                          , SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
-                                     , CAST ( @MessageBody  AS NVARCHAR(MAX) ) )
+                                     , @MessageBody )
                          , @MAC
                          , OBJECT_NAME(@@PROCID)
                          , 'Complete' );
@@ -1670,9 +1629,9 @@ SET NOCOUNT ON;
     SELECT @Id
          , ISNULL( @ConversationGroupId, 0x0 ) 
          , ISNULL( @ConversationHandle, 0x0 )
-         , ISNULL( @MessageBody, '<empty />' )
+         , ISNULL( @MessageBody, 0x0 )
          , ISNULL( SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
-                             , @MessageBody.value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
+                             , CAST( @MessageBody AS XML ).value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
                   , 0x0 )     
          , ISNULL( @MAC, 0x0 )
          , OBJECT_NAME( @@PROCID )
@@ -1681,7 +1640,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -1780,11 +1739,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -1836,7 +1795,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , 1
                        , @Id )
     FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -1870,11 +1829,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -1972,7 +1931,7 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2007,11 +1966,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2066,7 +2025,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , 1
                        , @Id )
     FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2101,11 +2060,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2160,7 +2119,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , 1
                        , @Id )
     FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2195,11 +2154,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2246,7 +2205,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , 1
                        , @Id )
     FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2281,11 +2240,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2333,7 +2292,7 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id  
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2368,11 +2327,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2423,7 +2382,7 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2458,11 +2417,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2527,7 +2486,7 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id  
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2562,11 +2521,11 @@ SET NOCOUNT ON;
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
+      , @SchemaVerified BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID);
   BEGIN TRY
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , 0x0 -- @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -2619,7 +2578,7 @@ DECLARE @ErrorData VARBINARY(8000)
     SELECT @Id
          , ISNULL( d.ConversationHandle, 0x0 )
          , ISNULL( d.ConversationGroupId, 0x0 )
-         , ISNULL( d.Message, '')
+         , ISNULL( d.Message, 0x0 )
          , ISNULL( d.Signature, 0x0 )
          , ISNULL( @MAC, 0x0 ) 
          , 'Instead' + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
@@ -2631,7 +2590,7 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id  
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -2669,7 +2628,7 @@ RETURNS INT
 $(WITH_OPTIONS)
 AS
 BEGIN
-  DECLARE @SaltName NVARCHAR(443) = FORMATMESSAGE( $(MESSAGE_OFFSET)17
+  DECLARE @SaltName NVARCHAR(443) = FORMATMESSAGE( $(MESSAGE_OFFSET)01
                                                  , @DbName
                                                  , @SchemaName
                                                  , @TableName
@@ -3168,7 +3127,8 @@ BEGIN
   RETURN (SELECT CASE WHEN COUNT(*) = $(OBJECT_COUNT) - $(TABLE_COUNT) 
                       THEN 1 ELSE 0 END
           FROM sys.certificates c
-          CROSS APPLY sys.fn_check_object_signatures ('certificate', c.thumbprint) s
+          CROSS APPLY sys.fn_check_object_signatures ( 'certificate'
+		                                             , c.thumbprint) s
           WHERE c.name = '$(OBJECT_CERTIFICATE)'
           AND c.pvt_key_encryption_type = 'PW'
           AND OBJECT_SCHEMA_NAME (entity_id) = '$(EHA_SCHEMA)'
@@ -3211,15 +3171,15 @@ DECLARE @ErrorData VARBINARY(8000)
       , @Name NVARCHAR(448)
       , @NameBucket INT
       , @Parameters VARBINARY(8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @Status NVARCHAR(30)
       , @Value NVARCHAR(128)
       , @ValueBucket INT;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = 
       ( SELECT ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                           , FORMATMESSAGE( $(MESSAGE_OFFSET)01
+                           , FORMATMESSAGE( '@tvp.Name = ''%s'', @tvp.Value = ''%s'' @Version = %d'
                                           , CAST( DECRYPTBYKEY( Name ) AS NVARCHAR(448) )
                                           , sys.fn_varbintohexstr( DECRYPTBYKEY( Value
                                                                                , 1
@@ -3231,7 +3191,7 @@ DECLARE @ErrorData VARBINARY(8000)
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                          , @Parameters
-                         , @SignedReferences
+                         , @SchemaVerified
                          , @Id OUTPUT
                          , @MAC OUTPUT; 
     -- verify a book row for passed ID that using returned authenticator (signature) 
@@ -3339,7 +3299,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -3376,14 +3336,14 @@ DECLARE @Id NCHAR(36)
       , @MAC VARBINARY(128)
       , @NameBucket INT
       , @Parameters VARBINARY(8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @ErrorData VARBINARY(8000);
 SET NOCOUNT ON;  
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = 
       ( SELECT ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                           , FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                           , FORMATMESSAGE( '@NameBucket = %d, @Version = %d'
                                            , @NameBucket
                                            , @Version)
                            , 1
@@ -3391,7 +3351,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -3447,7 +3407,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -3486,15 +3446,15 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Name NVARCHAR(448)
       , @Parameters VARBINARY(8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @Status NVARCHAR(30)
       , @Value NVARCHAR(128);      
   BEGIN TRY
     SET @IsValid = 0;
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = 
       ( SELECT ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                           , FORMATMESSAGE( $(MESSAGE_OFFSET)01
+                           , FORMATMESSAGE( '@tvp.Name = ''%s'', @tvp.Value = ''%s'' @Version = %d'
                                           , CAST( DECRYPTBYKEY( Name ) AS NVARCHAR(448) )
                                           , sys.fn_varbintohexstr( DECRYPTBYKEY( Value
                                                                                , 1
@@ -3506,7 +3466,7 @@ DECLARE @ErrorData VARBINARY(8000)
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -3595,7 +3555,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , 1
                        , @Id )
     FROM @tvp  
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -3633,27 +3593,27 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Parameters VARBINARY(8000)
       , @ReturnCode INT
-      , @SaltName NVARCHAR(448) = FORMATMESSAGE( $(MESSAGE_OFFSET)17
+      , @SaltName NVARCHAR(448) = FORMATMESSAGE( $(MESSAGE_OFFSET)01
                                                , @DbName
                                                , @SchemaName
                                                , @TableName
                                                , @ColumnName )
       , @SaltValue NVARCHAR(128)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @tvp NAMEVALUETYPE
       , @Version INT; 
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)05
+                                  , FORMATMESSAGE( '@DBName = ''%s'', @SchemaName= ''%s'', @TableName = ''%s'', @ColumnName = ''%s'''
                                                  , @DbName, @SchemaName, @TableName, @ColumnName )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -3678,7 +3638,7 @@ SET NOCOUNT ON;
          , ENCRYPTBYKEY( KEY_GUID('$(VALUE_SYMMETRIC_KEY)'), @SaltValue, 1, @SaltName );
     EXEC @ReturnCode = $(EHA_SCHEMA).AddNameValue @tvp, @Version OUTPUT;   
     IF @ReturnCode <> 0
-      RAISERROR( $(MESSAGE_OFFSET)22, 16, 1
+      RAISERROR( $(MESSAGE_OFFSET)12, 16, 1
                 , @DbName, @SchemaName, @TableName, @ColumnName, 'MakeSalt' ,@ReturnCode);  
     INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) 
       ( Id
@@ -3715,7 +3675,7 @@ SET NOCOUNT ON;
                          , ErrorInfo 
                          , 1
                          , @Id )
-      FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+      FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                 , ERROR_NUMBER()
                                 , ERROR_SEVERITY()
                                 , ERROR_STATE()
@@ -3735,8 +3695,11 @@ IF OBJECT_ID ('$(EHA_SCHEMA).SavePortableSymmetricKey') IS NOT NULL
    DROP PROCEDURE $(EHA_SCHEMA).SavePortableSymmetricKey
 GO
 -------------------------------------------------------------------------------
---    bwunder at yahoo dot com
---    Desc: backup the service master key of the SQL Server Instance
+-- bwunder at yahoo dot com
+-- Desc: Save the Identity and Source of a symmetric key to NameValues
+-- The Phrase may also be stored in NameValues idenpendently (not done here)
+-- Save the phrase as a private value and use that private value phrase as
+-- authorization to decipher any existing data encrypted buy the portable key
 -------------------------------------------------------------------------------
 CREATE PROCEDURE $(EHA_SCHEMA).SavePortableSymmetricKey 
  ( @KeyName NVARCHAR(128) 
@@ -3748,24 +3711,25 @@ BEGIN
 DECLARE @MAC VARBINARY(128)
       , @Parameters VARBINARY(8000)
       , @Id NCHAR(36)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
-      , @tvp NAMEVALUETYPE
+      , @SchemaVerified BIT
+      , @Identitytvp NAMEVALUETYPE
+      , @Sourcetvp NAMEVALUETYPE
       , @Version INT
       , @ErrorData VARBINARY(8000);
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)06
+                                  , FORMATMESSAGE( '@KeyName = ''%s'', @KeyIdentity = %s, @KeySource = %s'
                                                  , @KeyName
-                                                 , CAST( DECRYPTBYKEY( @KeyIdentity ) AS NVARCHAR(128) )
-                                                 , CAST( DECRYPTBYKEY( @KeySource ) AS NVARCHAR(128) ) )
+                                                 , sys.fn_varbintohexstr( @KeyIdentity )
+                                                 , sys.fn_varbintohexstr( @KeySource ) )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -3781,7 +3745,7 @@ SET NOCOUNT ON;
                                                          , Status ) AS NVARCHAR(128) )
                                           , @MAC ) = 1 ) 
       RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    INSERT @tvp 
+    INSERT @Identitytvp 
       ( Name
       , Value) 
     VALUES( ENCRYPTBYKEY( KEY_GUID('$(NAME_SYMMETRIC_KEY)')
@@ -3789,9 +3753,8 @@ SET NOCOUNT ON;
           , ENCRYPTBYKEY( KEY_GUID('$(VALUE_SYMMETRIC_KEY)')
                         , CAST( DECRYPTBYKEY( @KeyIdentity ) AS NVARCHAR(128) ), 1, FORMATMESSAGE( '%s.Identity'
                                                         , @KeyName ) ) );
-    EXEC $(EHA_SCHEMA).AddNameValue @tvp, @Version OUTPUT;   
-    DELETE @tvp;
-    INSERT @tvp 
+    EXEC $(EHA_SCHEMA).AddNameValue @Identitytvp, @Version OUTPUT;   
+    INSERT @Sourcetvp 
       ( Name
       , Value) 
     VALUES( ENCRYPTBYKEY( KEY_GUID('$(NAME_SYMMETRIC_KEY)')
@@ -3799,7 +3762,7 @@ SET NOCOUNT ON;
           , ENCRYPTBYKEY( KEY_GUID('$(VALUE_SYMMETRIC_KEY)')
                         , CAST( DECRYPTBYKEY( @KeySource ) AS NVARCHAR(128) ), 1, FORMATMESSAGE( '%s.Source'
                                                       , @KeyName ) ) );
-    EXEC $(EHA_SCHEMA).AddNameValue @tvp, @Version OUTPUT;   
+    EXEC $(EHA_SCHEMA).AddNameValue @Sourcetvp, @Version OUTPUT;   
     INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) 
       ( Id
       , MAC
@@ -3828,7 +3791,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -3842,6 +3805,119 @@ SET NOCOUNT ON;
 END
 GO
 ADD SIGNATURE TO $(EHA_SCHEMA).SavePortableSymmetricKey
+BY CERTIFICATE $(OBJECT_CERTIFICATE)
+WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
+GO
+IF OBJECT_ID ('$(EHA_SCHEMA).GetPortableSymmetricKey') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).GetPortableSymmetricKey
+GO
+-------------------------------------------------------------------------------
+-- bwunder at yahoo dot com
+-- Desc: Fetch the Identity and Source of a symmetric key from NameValues
+-- The Phrase may also be stored in NameValues but is not retrieved here
+-------------------------------------------------------------------------------
+CREATE PROCEDURE $(EHA_SCHEMA).GetPortableSymmetricKey 
+ ( @KeyName NVARCHAR(128) 
+ , @KeyIdentity VARBINARY(8000) OUTPUT
+ , @KeySource VARBINARY(8000) OUTPUT )
+$(WITH_OPTIONS)
+AS
+BEGIN 
+DECLARE @MAC VARBINARY(128)
+      , @Parameters VARBINARY(8000)
+      , @Id NCHAR(36)
+      , @SchemaVerified BIT
+      , @Identitytvp NAMEVALUETYPE
+      , @Sourcetvp NAMEVALUETYPE
+      , @Version INT
+      , @ErrorData VARBINARY(8000);
+SET NOCOUNT ON;
+  BEGIN TRY
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
+    SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
+                                  , FORMATMESSAGE( '@KeyName = ''%s'''
+								                 , @KeyName )
+                                  , 1
+                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
+    CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @SchemaVerified
+                          , @Id OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @Id
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)' )
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+    INSERT @Identitytvp 
+      ( Name
+      , Value) 
+    VALUES( ENCRYPTBYKEY( KEY_GUID('$(NAME_SYMMETRIC_KEY)')
+                        , FORMATMESSAGE('%s.Identity', @KeyName) )
+          , ENCRYPTBYKEY( KEY_GUID('$(VALUE_SYMMETRIC_KEY)')
+                        , CAST( DECRYPTBYKEY( @KeyIdentity ) AS NVARCHAR(128) ), 1, FORMATMESSAGE( '%s.Identity'
+                                                        , @KeyName ) ) );
+    EXEC $(EHA_SCHEMA).AddNameValue @Identitytvp, @Version OUTPUT;   
+    INSERT @Sourcetvp 
+      ( Name
+      , Value) 
+    VALUES( ENCRYPTBYKEY( KEY_GUID('$(NAME_SYMMETRIC_KEY)')
+                        , FORMATMESSAGE('%s.Source', @KeyName) )
+          , ENCRYPTBYKEY( KEY_GUID('$(VALUE_SYMMETRIC_KEY)')
+                        , CAST( DECRYPTBYKEY( @KeySource ) AS NVARCHAR(128) ), 1, FORMATMESSAGE( '%s.Source'
+                                                      , @KeyName ) ) );
+    EXEC $(EHA_SCHEMA).AddNameValue @Sourcetvp, @Version OUTPUT;   
+    INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) 
+      ( Id
+      , MAC
+      , Action
+      , Status )
+    VALUES ( @Id
+           , @MAC
+           , OBJECT_NAME(@@PROCID)
+           , 'Complete' );    
+    CLOSE ALL SYMMETRIC KEYS;
+  END TRY
+  BEGIN CATCH
+    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
+    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
+    INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) 
+     ( Id
+     , MAC 
+     , Action
+     , Status 
+     , ErrorData)
+    SELECT @Id
+         , ISNULL( @MAC, 0x0 )
+         , OBJECT_NAME(@@PROCID)
+         , 'Error'    
+         , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
+                       , ErrorInfo 
+                       , 1
+                       , @Id )
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                              , ERROR_NUMBER()
+                              , ERROR_SEVERITY()
+                              , ERROR_STATE()
+                              , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
+                              , ERROR_LINE()
+                              , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
+    CLOSE ALL SYMMETRIC KEYS;
+    IF @@NESTLEVEL > 1
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+  END CATCH
+END
+GO
+ADD SIGNATURE TO $(EHA_SCHEMA).GetPortableSymmetricKey
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -3860,7 +3936,7 @@ CREATE PROCEDURE $(EHA_SCHEMA).SavePrivateValue
  ( @Name NVARCHAR(448) 
  , @Value VARBINARY(8000) 
  , @EncryptionPhrase VARBINARY(8000) 
- , @AuditPrivateData BIT = 0 )  
+ , @AuditPrivateData TINYINT = 0 ) -- formatmessage does not speak BIT  
 $(WITH_OPTIONS)
 AS
 BEGIN 
@@ -3870,25 +3946,32 @@ DECLARE @DbName NVARCHAR(128)
       , @MAC VARBINARY(128) 
       , @Parameters VARBINARY(8000)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @tvp NAMEVALUETYPE
       , @Version INT;
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)04
-                                                 , CASE 
+                                  , FORMATMESSAGE( '@Name = ''%s'', @Value = ''%s'', @PrivatePhrase = ''%s'', @AuditPrivateData = %d'
+                                                 , @Name
+												 , CASE 
                                                    WHEN @AuditPrivateData = 1 
-                                                   THEN  @Name
-                                                   ELSE N'DATAVALUE_NOT_AUDITED'
-                                                   END ) 
+                                                   THEN @Value
+                                                   ELSE N'**PRIVATE DATA NOT AUDITED**'
+                                                   END
+												 , CASE 
+                                                   WHEN @AuditPrivateData = 1 
+                                                   THEN @PrivatePhrase
+                                                   ELSE N'**PRIVATE DATA NOT AUDITED**'
+                                                   END
+												 , @AuditPrivateData ) 
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS 
@@ -3948,7 +4031,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -3977,8 +4060,8 @@ GO
 -------------------------------------------------------------------------------
 CREATE PROCEDURE $(EHA_SCHEMA).GetPrivateValue 
  ( @Name NVARCHAR(448) 
- , @EncryptionPhrase NVARCHAR(128)
- , @AuditPrivateData BIT = 0
+ , @PrivatePhrase NVARCHAR(128)
+ , @AuditPrivateData TINYINT = 0 -- formatmessage does not speak BIT  
  , @Value NVARCHAR(128) OUTPUT )  
 $(WITH_OPTIONS)              
 AS
@@ -3989,25 +4072,27 @@ DECLARE @DbName NVARCHAR(128)
       , @MAC VARBINARY(128) 
       , @Parameters VARBINARY(8000)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @tvp NAMEVALUETYPE
       , @Version INT;
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)04
-                                                 , CASE 
+                                  , FORMATMESSAGE( '@Name = ''%s'', @PrivatePhrase = ''%s'', @AuditPrivateData = %d'
+                                                 , @Name
+												 , CASE 
                                                    WHEN @AuditPrivateData = 1 
-                                                   THEN  @Name
-                                                   ELSE N'VALUE_NOT_AUDITED'
-                                                   END ) 
+                                                   THEN @PrivatePhrase
+                                                   ELSE N'**PRIVATE DATA NOT AUDITED**'
+                                                   END
+												 , @AuditPrivateData ) 
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS 
@@ -4063,7 +4148,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -4080,6 +4165,7 @@ ADD SIGNATURE TO $(EHA_SCHEMA).GetPrivateValue
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
+
 ------------------------
 --backup/restsore procs
 ------------------------
@@ -4089,14 +4175,11 @@ GO
 -------------------------------------------------------------------------------
 --    bwunder at yahoo dot com
 --    Desc: backup the service master key of the SQL Server Instance
---      specify    @UseHash = 1
---      use name that identifies backup or checksum of it's hash as file name
---      force a backup even if current version of key is already backed up 
 -------------------------------------------------------------------------------
 CREATE PROCEDURE $(EHA_SCHEMA).BackupServiceMasterKey 
  ( @BackupPhrase VARBINARY(8000) 
- , @UseHash TINYINT = 0    -- readable Name (0) or Bucket # (1) as the file name
- , @ForceNew TINYINT = 0 ) -- backup even if thw crypto object already on file
+ , @UseHash TINYINT = 0    -- use Name (0) or NameBucket (1) as the file name
+ , @ForceNew TINYINT = 0 ) -- backup even if crypto object already in archive
 $(WITH_OPTIONS)
 AS
 BEGIN 
@@ -4120,14 +4203,15 @@ DECLARE @ActionType NVARCHAR(10) = 'Backup'
       , @Parameters VARBINARY(8000)
       , @ParentName NVARCHAR(128) = 'root'
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
-      , @VerifySigned BIT
+      , @SchemaVerified BIT
       , @tvp NAMEVALUETYPE;
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)' )
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)11
+                                  , FORMATMESSAGE( '@BackupPhrase = ''%s''' 
+								                 + ', @UseHash = %d' 
+												 + ', @ForceNew = %d'
                                                  , @BackupPhrase
                                                  , @UseHash
                                                  , @ForceNew )
@@ -4136,7 +4220,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -4162,8 +4246,8 @@ SET NOCOUNT ON;
                                                      , Word )
     FROM ( SELECT CAST( DECRYPTBYKEY( @BackupName ) AS NVARCHAR(128) ) AS Word ) AS derived;
     SET @BackupPath = $(EHA_SCHEMA).BackupPath(@DbName);
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)45
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -4182,7 +4266,7 @@ SET NOCOUNT ON;
         ORDER BY CreateUTCDT DESC ) = @Colophon   
       BEGIN
         IF @ForceNew <> 1
-          RAISERROR($(MESSAGE_OFFSET)24, 16, 1, @DbName, @NodeName ); 
+          RAISERROR($(MESSAGE_OFFSET)38, 16, 1, @DbName, @NodeName ); 
         ELSE
           SET @Edition = (SELECT MAX(Edition) + 1
                           FROM  $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
@@ -4222,9 +4306,9 @@ SET NOCOUNT ON;
     FROM @tvp;       
     EXEC @ReturnCode = sp_executesql @BackupDDL;
     IF @ReturnCode <> 0
-      RAISERROR($(MESSAGE_OFFSET)22, 16, 1, @NodeName, '', '', '', @ActionType, @ReturnCode );
+      RAISERROR($(MESSAGE_OFFSET)12, 16, 1, @NodeName, '', '', '', @ActionType, @ReturnCode );
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21, 0, 0, @NodeName, '', '', '', @ActionType );
+      RAISERROR($(MESSAGE_OFFSET)11, 0, 0, @NodeName, '', '', '', @ActionType );
     INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
       ( Id
       , DbName
@@ -4297,7 +4381,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -4348,13 +4432,13 @@ DECLARE @ActionType NVARCHAR(10) = 'Restore'
       , @Parameters VARBINARY(8000)
       , @RestoreDDL NVARCHAR(MAX)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @UseHash TINYINT;
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)12
+                                  , FORMATMESSAGE( '@IdToRestore = %d, @ForceRestore = %d'
                                                  , @IdToRestore
                                                  , @ForceReplace )
                                   , 1
@@ -4362,7 +4446,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS  ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -4395,7 +4479,7 @@ SET NOCOUNT ON;
                 , @Node = k.Node  
                 , @CipherType = k.CipherType                
                 , @RestoreDDL = 
-                    FORMATMESSAGE ( $(MESSAGE_OFFSET)22  
+                    FORMATMESSAGE ( $(MESSAGE_OFFSET)12  
                                   , @DbName   
                                   , CAST( DecryptByKey( k.BackupPath
                                                       , 1
@@ -4427,11 +4511,11 @@ SET NOCOUNT ON;
     ORDER BY CreateUTCDT DESC;
     EXEC @ReturnCode = sp_executesql @RestoreDDL;
     IF @ReturnCode <> 0 or @MAC IS NULL
-      RAISERROR($(MESSAGE_OFFSET)22,16,1,@NodeName,'','','', @ActionType, @ReturnCode);
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,@NodeName,'','','', @ActionType, @ReturnCode);
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21,0,0,@NodeName,'','','', @ActionType);
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)45
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+      RAISERROR($(MESSAGE_OFFSET)11,0,0,@NodeName,'','','', @ActionType);
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -4523,7 +4607,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -4539,7 +4623,7 @@ BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
 IF OBJECT_ID ('$(EHA_SCHEMA).BackupDatabaseMasterKey') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).BackupDatabaseMasterKey
+  DROP PROCEDURE $(EHA_SCHEMA).BackupDatabaseMasterKey
 GO
 -------------------------------------------------------------------------------
 --    bwunder at yahoo dot com
@@ -4547,41 +4631,41 @@ GO
 --    ASSERT: DMK is a symmetric key in the db named "##MS_DatabaseMasterKey##"
 -------------------------------------------------------------------------------
 CREATE PROCEDURE $(EHA_SCHEMA).BackupDatabaseMasterKey 
- ( @DbName NVARCHAR(128)
- , @BackupPhrase VARBINARY(8000)
- , @KeyPhrase VARBINARY(8000) = NULL -- specify NULL or DEFAULT if no encryption PHRASE used 
- , @UseHash TINYINT = 0              -- use BackupName (0) clear text or BackupNameBucket (1) value as file name
- , @ForceNew TINYINT = 0 )           -- if 1 backup even if key already on file
+  ( @DbName NVARCHAR(128)
+  , @BackupPhrase VARBINARY(8000)
+  , @KeyPhrase VARBINARY(8000) = NULL -- specify NULL or DEFAULT if no encryption PHRASE used 
+  , @UseHash TINYINT = 0              -- use BackupName (0) clear text or BackupNameBucket (1) value as file name
+  , @ForceNew TINYINT = 0 )           -- if 1 backup even if key already on file
 $(WITH_OPTIONS)
 AS
 BEGIN 
- DECLARE @ActionType NVARCHAR(10) = 'Backup'
-       , @BackupDDL NVARCHAR(4000)
-       , @BackupName VARBINARY(8000)
-       , @BackupNameBucket INT
-       , @BackupPath VARBINARY(8000)
-       , @BackupPhraseVersion SMALLINT
-       , @Backuptvp NAMEVALUETYPE
-       , @Colophon INT
-       , @Edition SMALLINT
-       , @CipherType NCHAR(2)
-       , @Id NCHAR(36)
-       , @KeyPhraseVersion SMALLINT
-       , @Keytvp NAMEVALUETYPE
-       , @MAC VARBINARY(128) 
-       , @Node HIERARCHYID
-       , @NodeName NVARCHAR(128) = 'Database Master Key'
-       , @ObjectInfoDDL NVARCHAR(512)
-       , @Parameters varbinary(8000)
-       , @ParentName NVARCHAR(128) = 'Service Master Key'
-       , @ReturnCode INT
-       , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
-       , @ErrorData VARBINARY(8000);
+DECLARE @ActionType NVARCHAR(10) = 'Backup'
+    , @BackupDDL NVARCHAR(4000)
+    , @BackupName VARBINARY(8000)
+    , @BackupNameBucket INT
+    , @BackupPath VARBINARY(8000)
+    , @BackupPhraseVersion SMALLINT
+    , @Backuptvp NAMEVALUETYPE
+    , @Colophon INT
+    , @Edition SMALLINT
+    , @CipherType NCHAR(2)
+    , @Id NCHAR(36)
+    , @KeyPhraseVersion SMALLINT
+    , @Keytvp NAMEVALUETYPE
+    , @MAC VARBINARY(128) 
+    , @Node HIERARCHYID
+    , @NodeName NVARCHAR(128) = 'Database Master Key'
+    , @ObjectInfoDDL NVARCHAR(512)
+    , @Parameters varbinary(8000)
+    , @ParentName NVARCHAR(128) = 'Service Master Key'
+    , @ReturnCode INT
+    , @SchemaVerified BIT
+    , @ErrorData VARBINARY(8000);
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)13
+                                  , FORMATMESSAGE( '@DbName = ''%s'', @BackupPhrase = ''%s'', @KeyPhrase = ''%s'', @ForceNew = %d'
                                                  , @DbName
                                                  , @BackupPhrase
                                                  , @KeyPhrase
@@ -4591,7 +4675,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -4611,8 +4695,8 @@ SET NOCOUNT ON;
       RAISERROR($(MESSAGE_OFFSET)35,16,1,'Database', 'database not found');
     -- booking complete, keys open
     SET @Node = $(EHA_SCHEMA).GetNode ( @NodeName, @DbName, @@SERVERNAME )
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)45
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -4633,7 +4717,7 @@ SET NOCOUNT ON;
         ORDER BY CreateUTCDT DESC) = @Colophon   
       BEGIN
         IF @ForceNew <> 1
-          RAISERROR($(MESSAGE_OFFSET)24, 16, 1, @DbName, @NodeName ); 
+          RAISERROR($(MESSAGE_OFFSET)38, 16, 1, @DbName, @NodeName ); 
         ELSE
           SET @Edition = (SELECT MAX(Edition) + 1
                                FROM  $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
@@ -4684,7 +4768,7 @@ SET NOCOUNT ON;
     SET @BackupDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)26
                                    , @DbName
                                    , CASE WHEN DB_NAME() <> @DbName AND @KeyPhrase IS NOT NULL
-                                          THEN FORMATMESSAGE ($(MESSAGE_OFFSET)43, @KeyPhrase )
+                                          THEN FORMATMESSAGE ($(MESSAGE_OFFSET)20, @KeyPhrase )
                                           ELSE '' END
                                    , CAST(DECRYPTBYKEY(@BackupPath, 1, @DbName) AS NVARCHAR(1024)) 
                                    , CASE WHEN @UseHash = 1 
@@ -4700,9 +4784,9 @@ SET NOCOUNT ON;
         SET @BackupDDL += 'CLOSE MASTER KEY;';
     EXEC @ReturnCode = sp_executesql @BackupDDL;
     IF @ReturnCode <> 0
-      RAISERROR($(MESSAGE_OFFSET)22,16,1,'DATABASE', @DbName,'Master Key','', @ActionType, @ReturnCode);
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,'DATABASE', @DbName,'Master Key','', @ActionType, @ReturnCode);
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21,0,0,'DATABASE', @DbName,'Master Key','', @ActionType);
+      RAISERROR($(MESSAGE_OFFSET)11,0,0,'DATABASE', @DbName,'Master Key','', @ActionType);
     INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
       ( Id
       , DbName
@@ -4779,7 +4863,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -4834,13 +4918,13 @@ DECLARE @ActionType NVARCHAR(10) = 'Restore'
       , @ObjectInfoDDL NVARCHAR(512)
       , @Parameters VARBINARY(8000)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @UseHash TINYINT;
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)14
+                                  , FORMATMESSAGE( '@DbName = ''%s'', @IdToRestore = %d, @ForceReplace = %d'
                                                  , @DbName
                                                  , @IdToRestore
                                                  , @ForceReplace)
@@ -4849,7 +4933,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -4942,12 +5026,12 @@ SET NOCOUNT ON;
          CROSS JOIN @Keytvp k ); 
     EXEC @ReturnCode = sp_executesql @DMKRestoreDDL;
     IF @ReturnCode <> 0 
-      RAISERROR($(MESSAGE_OFFSET)22, 16, 1, 'DATABASE', @DbName, @NodeName, '', @ActionType, @ReturnCode );
+      RAISERROR($(MESSAGE_OFFSET)12, 16, 1, 'DATABASE', @DbName, @NodeName, '', @ActionType, @ReturnCode );
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21, 0, 0, 'DATABASE', @DbName, @NodeName, '', @ActionType );
+      RAISERROR($(MESSAGE_OFFSET)11, 0, 0, 'DATABASE', @DbName, @NodeName, '', @ActionType );
     -- @CipherType can be blank if encryption type not in ESKM, ESKP is it true???
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)45
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -5043,7 +5127,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                      , ERROR_NUMBER()
                                      , ERROR_SEVERITY()
                                      , ERROR_STATE()
@@ -5070,8 +5154,8 @@ CREATE PROCEDURE $(EHA_SCHEMA).BackupCertificate
  , @DbName NVARCHAR(128) 
  , @BackupPhrase VARBINARY(8000) = NULL -- use stored value if exists 
  , @KeyPhrase VARBINARY(8000) = NULL    -- value needed only when type = PW
- , @UseHash TINYINT = 0                 -- use BackupName (0) clear text or BackupNameBucket (1) as file name
- , @ForceNew TINYINT = 0 )              -- if 1 backup even if backup of this uniquely identified key already on file
+ , @UseHash BIT = 0                 -- use BackupName (0) clear text or BackupNameBucket (1) as file name
+ , @ForceNew BIT = 0 )              -- if 1 backup even if backup of this uniquely identified key already on file
 $(WITH_OPTIONS)
 AS
 BEGIN 
@@ -5099,24 +5183,30 @@ DECLARE @ActionType NVARCHAR(10) = 'Backup'
       , @Parameters VARBINARY(8000)
       , @ParentName NVARCHAR(128) = 'Database Master Key' 
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @ErrorData VARBINARY(8000);
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)15
+                                  , FORMATMESSAGE( '@CertificateName = ''%s''' 
+								                 + ', @DbName ''%s''' 
+												 + ', @BackupPhrase ''%s''' 
+												 + ', @KeyPhrase ''%s''' 
+												 + ', @UseHash = %d' 
+												 + ', @ForceNew = %d'
                                                  , @CertificateName
                                                  , @DbName
                                                  , @BackupPhrase
                                                  , @KeyPhrase
-                                                 , @ForceNew)
+												 , sys.fn_varbintohexstr( @UseHash )
+                                                 , sys.fn_varbintohexstr( @ForceNew ) )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -5144,8 +5234,8 @@ SET NOCOUNT ON;
     -- @CertificateName is used in this where clause first to stop any sql injection
     IF NOT EXISTS (SELECT name FROM @CertificateList WHERE name = @CertificateName)
       RAISERROR($(MESSAGE_OFFSET)35,16,1,'Certificate', 'certificate not found');
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)46
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -5166,7 +5256,7 @@ SET NOCOUNT ON;
         ORDER BY CreateUTCDT DESC) = @Colophon   
       BEGIN
         IF @ForceNew <> 1
-          RAISERROR($(MESSAGE_OFFSET)24, 16, 1, @DbName, @CertificateName ); 
+          RAISERROR($(MESSAGE_OFFSET)38, 16, 1, @DbName, @CertificateName ); 
         ELSE
           SET @Edition = (SELECT MAX(Edition) + 1
                           FROM  $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
@@ -5233,7 +5323,7 @@ SET NOCOUNT ON;
     SET @BackupDDL = (SELECT FORMATMESSAGE ( $(MESSAGE_OFFSET)27
                                            , @DbName 
                                            , CASE WHEN @DMKPhraseName IS NOT NULL -- need to open master key
-                                                   THEN (SELECT FORMATMESSAGE ( $(MESSAGE_OFFSET)43
+                                                   THEN (SELECT FORMATMESSAGE ( $(MESSAGE_OFFSET)20
                                                                               , CAST( DECRYPTBYKEY( Value
                                                                                                  , 1
                                                                                                  , CAST ( DECRYPTBYKEY( Name ) AS NVARCHAR(448) ) 
@@ -5273,9 +5363,9 @@ SET NOCOUNT ON;
                                                    ELSE '' END ) );                       
     EXEC @ReturnCode = sp_executesql @BackupDDL;
     IF @ReturnCode <> 0
-      RAISERROR($(MESSAGE_OFFSET)22,16,1,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP',@ReturnCode);
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP',@ReturnCode);
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21, 0,0,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP');
+      RAISERROR($(MESSAGE_OFFSET)11, 0,0,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP');
     INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
       ( Id
       , DbName
@@ -5352,7 +5442,7 @@ SET NOCOUNT ON;
                       , ErrorInfo 
                       , 1
                       , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -5405,14 +5495,16 @@ DECLARE @BackupName VARBINARY(8000)
       , @RestoreDDL NVARCHAR(4000)
       , @Reason NVARCHAR(128)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @UseHash TINYINT
       , @ErrorData VARBINARY(8000);
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)16
+                                  , FORMATMESSAGE( '@CertificateName = ''%s''' 
+								                 + ', @DbName ''%s''' 
+												 + ', @IdToRestore = %d'
                                                  , @CertificateName
                                                  , @DbName
                                                  , @IdToRestore)
@@ -5421,7 +5513,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -5460,8 +5552,8 @@ SET NOCOUNT ON;
     AND Status = 'Complete'
     AND Id = ISNULL(@IdToRestore, Id)
     ORDER BY CreateUTCDT DESC;   
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)46
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -5477,7 +5569,7 @@ SET NOCOUNT ON;
     IF (@CertificateId IS NOT NULL) -- certificate exist - cannot restore
       BEGIN
         SET @Reason = 'Certificate ' + @CertificateName + ' already exits in Db ' + @DbName; 
-        RAISERROR($(MESSAGE_OFFSET)23,16,1,'DATABASE', @DbName, 'CERTIFICATE',@CertificateName,'RESTORE',@Reason);
+        RAISERROR($(MESSAGE_OFFSET)13,16,1,'DATABASE', @DbName, 'CERTIFICATE',@CertificateName,'RESTORE',@Reason);
       END
 
     SET @BackupPhraseName = $(EHA_SCHEMA).GetEHPhraseName(@DbName, @CertificateName, 'Backup', @Id );
@@ -5532,11 +5624,11 @@ SET NOCOUNT ON;
     SET @RestoreDDL += ';'
     EXEC @ReturnCode = sp_executesql @RestoreDDL
     IF @ReturnCode <> 0
-      RAISERROR($(MESSAGE_OFFSET)22,16,1,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP', @ReturnCode);
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP', @ReturnCode);
     ELSE
-      RAISERROR($(MESSAGE_OFFSET)21, 0,0,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP');
-    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)46
-                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)44
+      RAISERROR($(MESSAGE_OFFSET)11, 0,0,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP');
+    SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
+                                      , FORMATMESSAGE( $(MESSAGE_OFFSET)21
                                                      , '$(EHDB)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
@@ -5632,7 +5724,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -5668,20 +5760,20 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Parameters VARBINARY (8000)
       , @ReturnCode INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)07
-                                                 , @FileName, @Tag )
+                                  , FORMATMESSAGE( '@FilePath = ''%s'', @FileName = ''%s'', @Tag = ''%s'''
+                                                 , @FilePath, @FileName, @Tag )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -5705,7 +5797,7 @@ SET NOCOUNT ON;
                                          , @FilePath, @FileName );
     EXEC @ReturnCode = sp_executesql @GetContainerDDL, N'@Id NCHAR(36)', @Id;
     IF @ReturnCode <> 0  
-      RAISERROR($(MESSAGE_OFFSET)22,16,1,'@GetContainerDDL', @FilePath, @FileName, '', '' ,@ReturnCode);
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,'@GetContainerDDL', @FilePath, @FileName, '', '' ,@ReturnCode);
     INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
       ( Id
       , FileName
@@ -5748,7 +5840,7 @@ SET NOCOUNT ON;
                         , ErrorInfo 
                         , 1
                         , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -5785,11 +5877,11 @@ DECLARE @CaptureInstance NVARCHAR(128)
       , @MinLsn BINARY(10)
       , @MinLsnSinceTransfer BINARY(10)
       , @Parameters VARBINARY (8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @UTCOffset INT = DATEDIFF( hh, SYSUTCDATETIME(), SYSDATETIME() );
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
                                   , ''
                                   , 1
@@ -5797,7 +5889,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -6172,7 +6264,7 @@ SET NOCOUNT ON;
           , ServerName
           , ConversationHandle
           , ConversationGroupId
-          , CAST( Message AS NVARCHAR(MAX) )
+          , CAST( Message AS IMAGE )
           , Signature
           , MAC
           , Action
@@ -6181,7 +6273,7 @@ SET NOCOUNT ON;
           , CreateUTCDT
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE) 
-                                                  ( @MinLsn, @MaxLsn, 'all'); 
+                                                  ( @MinLsn, @MaxLsn, 'all' ); 
     INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
       ( Id
       , CaptureInstance
@@ -6238,7 +6330,7 @@ SET NOCOUNT ON;
           , CreateUTCDT
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE) 
-                                                  ( @MinLsn, @MaxLsn, 'all'); 
+                                                  ( @MinLsn, @MaxLsn, 'all' ); 
     INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
       ( Id
       , CaptureInstance
@@ -6290,7 +6382,7 @@ SET NOCOUNT ON;
           , CreateUTCDT
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) 
-                                                ( @MinLsn, @MaxLsn, 'all'); 
+                                                ( @MinLsn, @MaxLsn, 'all' ); 
     INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
       ( Id
       , CaptureInstance
@@ -6336,7 +6428,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -6373,12 +6465,12 @@ DECLARE @BeginLsn BINARY(10)
       , @MaxLsn BINARY(10)
       , @MinLsn BINARY(10)
       , @Parameters VARBINARY (8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @RowCount INT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
                                   , ''
                                   , 1
@@ -6386,7 +6478,7 @@ SET NOCOUNT ON;
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -6920,7 +7012,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                               , ERROR_NUMBER()
                               , ERROR_SEVERITY()
                               , ERROR_STATE()
@@ -6956,21 +7048,21 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Parameters VARBINARY (8000)
       , @RowCount INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @SourceServer NVARCHAR(128)
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)09
+                                  , FORMATMESSAGE( '@Id = ''%s'', @FileName = ''%s'''
                                                  , @Id, @FileName )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7067,7 +7159,7 @@ SET NOCOUNT ON;
                             , ErrorInfo 
                             , 1
                             , @Id )
-        FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+        FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                   , ERROR_NUMBER()
                                   , ERROR_SEVERITY()
                                   , ERROR_STATE()
@@ -7096,7 +7188,7 @@ GO
 --  missing or corrupt certificates provide thumbprint in failure message
 -------------------------------------------------------------------------------
 CREATE PROCEDURE $(EHA_SCHEMA).CertificateBackupsByThumbprint
- ( @thumbprint VARBINARY(20) )
+ ( @Thumbprint VARBINARY(20) )
 $(WITH_OPTIONS)
 AS
 BEGIN
@@ -7105,20 +7197,20 @@ DECLARE @MAC VARBINARY(128)
       , @Parameters VARBINARY (8000)
       , @RowCount INT
       , @ErrorData VARBINARY(8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)03
-                                                 , sys.fn_varbintohexstr(@thumbprint) )
+                                  , FORMATMESSAGE( '@Thumbprint = %s'
+                                                 , sys.fn_varbintohexstr(@Thumbprint) )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7149,7 +7241,7 @@ SET NOCOUNT ON;
         , CreateUTCDT
         , CreateUser
     FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)
-    WHERE Colophon = @thumbprint
+    WHERE Colophon = @Thumbprint
     ORDER BY Edition, CreateUTCDT DESC;
     SET @RowCount = @@ROWCOUNT;
     INSERT $(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE) 
@@ -7184,7 +7276,7 @@ SET NOCOUNT ON;
                        , ErrorInfo 
                        , 1
                        , @Id )
-     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                , ERROR_NUMBER()
                                , ERROR_SEVERITY()
                                , ERROR_STATE()
@@ -7218,20 +7310,20 @@ DECLARE @MAC VARBINARY(128)
       , @RowCount INT
       , @Parameters VARBINARY(8000)
       , @ErrorData VARBINARY(8000)
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
   BEGIN TRY
     IF @ServerName IS NULL
       SET @ServerName = @@SERVERNAME;
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)08, @ServerName )
+                                  , FORMATMESSAGE( '@ServerName = ''%s''', @ServerName )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7361,7 +7453,7 @@ DECLARE @MAC VARBINARY(128)
                        , ErrorInfo 
                        , 1
                        , @Id )
-     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                , ERROR_NUMBER()
                                , ERROR_SEVERITY()
                                , ERROR_STATE()
@@ -7394,20 +7486,20 @@ DECLARE @Id NCHAR(36)
       , @MAC VARBINARY(128)
       , @Parameters VARBINARY(8000)
       , @RowCount INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
   BEGIN TRY
     IF @ServerName IS NULL
       SET @ServerName = @@SERVERNAME;
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)08, @ServerName )
+                                  , FORMATMESSAGE( '@ServerName = ''%s''', @ServerName )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7547,7 +7639,7 @@ DECLARE @Id NCHAR(36)
                        , ErrorInfo 
                        , 1
                        , @Id )
-     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                , ERROR_NUMBER()
                                , ERROR_SEVERITY()
                                , ERROR_STATE()
@@ -7580,20 +7672,20 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Parameters VARBINARY(8000)
       , @RowCount INT
-      , @SignedReferences BIT = $(EHA_SCHEMA).VerifySchema(@@PROCID)
+      , @SchemaVerified BIT
       , @StartDT DATETIME2 = SYSUTCDATETIME()
   BEGIN TRY
     IF @ServerName IS NULL
       SET @ServerName = @@SERVERNAME;
-    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID;
+    EXEC $(EHA_SCHEMA).OpenAuditKey @@PROCID, @SchemaVerified OUTPUT;
     SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( $(MESSAGE_OFFSET)08, @ServerName )
+                                  , FORMATMESSAGE( '@ServerName = ''%s''', @ServerName )
                                   , 1
                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book  @@PROCID
                           , @Parameters
-                          , @SignedReferences
+                          , @SchemaVerified
                           , @Id OUTPUT
                           , @MAC OUTPUT; 
     IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7697,7 +7789,7 @@ DECLARE @ErrorData VARBINARY(8000)
                        , ErrorInfo 
                        , 1
                        , @Id )
-     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)18
+     FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
                                , ERROR_NUMBER()
                                , ERROR_SEVERITY()
                                , ERROR_STATE()
@@ -8005,7 +8097,7 @@ SET @Value = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                  ,  CAST( '$(LINK_PASSWORD)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).SavePrivateValue @Name = 'LINK_PASSWORD'
                                   , @Value = @Value
-                                  , @EncryptionPhrase = @EncryptionPhrase
+                                  , @EncryptionPhrase = @PrivatePhrase
                                   , @AuditPrivateData = DEFAULT;
 -- already have @PrivatePhrase
 SET @Value = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
