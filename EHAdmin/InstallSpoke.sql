@@ -7,7 +7,7 @@
 --  2. Mount-able TrueCrypt virtual disk file (see http://www.truecrypt.org)
 --  3. Usable ODBC System DSN to hub database
 -- Other Important Notes:
---  1. Use this script in SSMS using SQLCMD mode only. 
+--  1. Use this script in SSMS/SSDT using SQLCMD mode only. 
 --  2. ALWAYS replace template tokens with your secrets.  
 --  3. NEVER save this script once the secrets have been entered. 
 --  4. Give the SQL Server Database Engine's service account full control of the 
