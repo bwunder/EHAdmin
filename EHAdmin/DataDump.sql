@@ -60,12 +60,11 @@ DECRYPTION BY CERTIFICATE AuditCertificate
 WITH PASSWORD = 'Au&6Gf% 3Fe14CQAN@wcf?';
 
 SELECT 'eha.Bookings' AS TableName
-SELECT * FROM eha.Bookings; 
 SELECT Id
      , ServerName
      , ProcId
      , ObjectName
-     , CAST( DECRYPTBYKEY( Parameters, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(4000) ) AS [Parameters (decyphered)]
+     , CAST( DECRYPTBYKEY( Parameters, 1, KeyGuid ) AS NVARCHAR(4000) ) AS [Parameters (decyphered)]
      , Status
      , CAST( DECRYPTBYKEY ( ErrorData, 1, CAST(Id AS NCHAR(36)) ) AS NVARCHAR(4000) ) AS [ErrorData (decyphered)]
      , CreateUTCDT
@@ -85,7 +84,6 @@ OPEN SYMMETRIC KEY FileKey
 DECRYPTION BY CERTIFICATE FileCertificate;
 
 SELECT 'eha.NameValues' AS TableName
-SELECT * FROM eha.NameValues;
 SELECT Id
      , ServerName
      , NameBucket
@@ -110,7 +108,6 @@ FROM (SELECT CAST(DecryptByKey( Name, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(1
 ORDER BY CreateUTCDT;
 
 SELECT 'eha.NameValueActivity' AS TableName
-SELECT * FROM eha.NameValueActivity;
 SELECT Id
      , ServerName
      , (SELECT VERIFYSIGNEDBYCERT( CERT_ID('AuthenticityCertificate') --$--(AUTHENTICITY_CERTIFICATE)')
@@ -118,6 +115,7 @@ SELECT Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , n.MAC )
         FROM eha.Bookings AS b
@@ -132,7 +130,6 @@ FROM eha.NameValueActivity AS n
 ORDER BY CreateUTCDT;
 
 SELECT 'eha.BackupActivity' AS TableName
-SELECT * FROM eha.BackupActivity;
 SELECT Id
      , ServerName
      , DbName
@@ -155,6 +152,7 @@ SELECT Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , a.MAC )
         FROM eha.Bookings AS b
@@ -170,7 +168,6 @@ FROM eha.BackupActivity a
 ORDER BY CreateUTCDT;
 
 SELECT 'eha.Containers' AS TableName
-SELECT * FROM eha.Containers;
 SELECT Id
      , ServerName
      , Tag
@@ -181,7 +178,6 @@ SELECT Id
 FROM eha.Containers;
 
 SELECT 'eha.ContainerActivity' AS TableName
-SELECT * FROM eha.ContainerActivity;
 SELECT a.Id
      , a.ServerName
      , CAST(DecryptByKey( a.FileName, 1, CAST(a.Id AS NCHAR(36) ) ) AS NVARCHAR(448) ) AS [FileName (deciphered)] 
@@ -194,6 +190,7 @@ SELECT a.Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , a.MAC )
         FROM eha.Bookings AS b
@@ -207,7 +204,6 @@ SELECT a.Id
 FROM eha.ContainerActivity AS a;
 
 SELECT 'eha.NotificationActivity' AS TableName
-SELECT * FROM eha.NotificationActivity;
 SELECT Id
      , ServerName
      , ConversationHandle
@@ -218,6 +214,7 @@ SELECT Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , a.MAC )
         FROM eha.Bookings AS b
@@ -231,7 +228,6 @@ SELECT Id
 FROM eha.NotificationActivity a
 
 SELECT 'eha.OffsiteActivity' AS TableName
-SELECT * FROM eha.OffsiteActivity;
 SELECT a.Id
      , a.CaptureInstance
      , a.ServerName
@@ -243,6 +239,7 @@ SELECT a.Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , a.MAC )
         FROM eha.Bookings AS b
@@ -257,7 +254,6 @@ FROM eha.OffsiteActivity a
 ORDER BY a.CreateUTCDT;
 
 SELECT 'eha.ReportActivity' AS TableName
-SELECT * FROM eha.ReportActivity;
 SELECT a.Id
      , a.ServerName
      , a.ReportProcedure
@@ -268,6 +264,7 @@ SELECT a.Id
                                                 , b.PROCID   
                                                 , b.ObjectName
                                                 , b.Parameters
+                                                , b.KeyGuid
                                                 , b.Status ) AS NVARCHAR(128) )
                                  , a.MAC )
         FROM eha.Bookings AS b
