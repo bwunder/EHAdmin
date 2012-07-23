@@ -3,70 +3,63 @@
 -- Encryption Hierarchy Administration Spoke  
 -------------------------------------------------------------------------------
 -- Pre-requisites 
---  1. SQL Server 2012 RTM (wants a SQL Agent)
---  2. Mount-able TrueCrypt virtual disk KEY_CONTAINER_FILE (see http://www.truecrypt.org)
---     easy to remove this requirement (use KEY_CONTAINER_PATH in place of
---     VHD_LETTER and remove mount/unmount SQLCMDs)  
---     systems where svc account is domain account can use FILESTREAM UNC 
---  3. hub database (InstallHub.sql) on SQL Server, SQL Azure or ?
---  4. Usable ODBC System DSN to hub database for use by LINK_SERVER_ODBC_DSN
--- Other Important Notes:
---  1 To protect the required secrets from compromise when entered in this script:
+--  1. SQL Server 2012.
+--  2. 10MB reservered secure storage - encrypted disk recommended - at EXPORT_PATH with 
+--     read/write access to service account  
+--  3. hub database (InstallHub.sql) on SQL Server, SQL Azure or ? 
+--     with SPOKE_ADMIN & SPOKE_BROKER users and connectivity to spoke 
+--  4. Usable ODBC System DSN to hub database on spoke server 
+--  5. Security Log access to service account for SQL Audit is preferred  
+--     see BOL: http://msdn.microsoft.com/en-us/library/cc645889.aspx
+--     requires enabled application generated|audit object access audit policy setting 
+--       auditpol /set /subcategory:"application generated" /success:enable /failure:enable
+--     and "generate security audits" permission to users in group policy
+--     less secure but can also target Application Event Log without policy changes 
+--     or no access to group policy. 
+-- Other notes:
+--  *  To protect the required secrets from compromise when entered in this script:
 --      A. ONLY Use this script in an SSMS/SSDT query window that supports SQLCMD mode. 
 --      B. ALWAYS replace the example template tokens with your secrets.  
 --      C. NEVER save this script once the secrets have been entered. 
---  2. Give the SQL Server Database Engine's service account full control of the 
---     VHD Container's folder and the mounted virtual disk. Include 
---     password used as the CRYPTO_CONTAINER_ENCRYPTION_PHRASE sqlcmd variable.
---     example: Estimating a generous 1.5KB/key and 3KB/certificate and given the  
---     Minimum TrueCrypt NTFS volume size possible: 3792k, est > 2000 exports. The  
---     bigger the file, the longer to back up to a VARBINARY(MAX) column and send to
---     hub. Growing TrueCrypt VHD once in use by the SQL instance is not a possibility.
---  3. Database Master Key and certificate for TDE are added to master database of  
---     TDE capable SKUs. (Developer, Enterprise, DataCenter) 
---  4. A login on the remote SQL instance already exist for use in the ODBC DSN
---     run InstallHub.sql on the remote before running InstallSpoke.sql here 
---  5. enables CLR if not already enabled for recall from offsite processing 
---  6. 'max text repl size (B)' is set to -1 (size limited only by type)  
---  7. User database is created if specified database does not exist by name
---  8. Database Master Key is created in this user database if not found   
---  9. Adjust passphrase hardness policy in the CheckPhrase() function.
--- 10. Algorithm defaults are best practice or otherwise called out as preferred 
+--  *  Database Master Key and certificate for TDE are added to master database of  
+--     TDE capable SKUs by this script. (Developer, Enterprise, DataCenter) 
+--  *  enables CLR if not already enabled for recall from offsite processing 
+--  *  'max text repl size (B)' is set to -1 (size limited only by type)  
+--  *  User database is created if specified database does not exist by name
+--  *  Database Master Key is created in this user database if not found   
+--  *  Adjust passphrase hardness policy in the CheckPhrase() function.
+--  *  Algorithm defaults are best practice or otherwise called out as preferred 
 --     in current industry and privacy standards, e.g. NIST: FIPS 140-2, PCI-DSS, 
 --     SAE16, etc. see: 
 --     http://blogs.msdn.com/b/ace_team/archive/2007/09/07/aes-vs-3des-block-ciphers.aspx
--- 11. Enterprise, DataCenter, Developer or Evaluation Edition SQL Server 
+--  *  Enterprise, DataCenter, Developer or Evaluation Edition SQL Server 
 --     required for TDE, Change Data Capture, SPARSE, FILESTREAM
--- 12. SQL Server 2012 required for FileTable, declarative assignment, 
+--  *  SQL Server 2012 required for FileTable, declarative assignment, 
 --     THROW, FORMATMESSAGE usage, FORMAT,  SHA2_512 algorithm, ALTER ROLE-ADD MEMBER, 
 --     AES SMK encryption, 
--- 13. (localdb)any will not work - FILESTREAM requires instance running as a service,
---     LinkedServer cannot use (localdb)any
--- 14. To build the script without TrueCrypt 
--- 15. This script is a work in progress...
+--  *  (localdb)any will not work FILESTREAM and LinkedServer require 
+--     instance running as a service,
+--  ** This script is a work in progress... 
 -------------------------------------------------------------------------------
 SET NOCOUNT ON;
 GO
--- SQLCMD variable assignment is not exposed in trace output but the batch that runs SET NOCOUNT ON will be! 
--- in live environments use "WITH EXECUTE AS CALLER, ENCRYPTION"
+-- SQLCMD variable assignments are not exposed in trace output but the batch that runs SET NOCOUNT ON will be! 
+-- in live environments use "WITH EXECUTE AS CALLER, ENCRYPTION" 
 -- in dev/test use "WITH EXECUTE AS CALLER" to enable debugging 
-:setvar WITH_OPTIONS                           "WITH EXECUTE AS CALLER" --, ENCRYPTION"                                                                   
--- private passphrase - never saved! must be remembered!  
--- used for secret obfuscation, private encryption of CRYPTO_CONTAINER_ENCRYPTION_PHRASE, LINK_PASSWORD and the SESSION_SYMMETRIC_KEY   
-:setvar PRIVATE_ENCRYPTION_PHRASE              "Private - never saved"  -- "<[PASSPHRASE_ENCRYPTION_PHRASE],VARCHAR,Private - never saved>"               
--- temp object keeps DDL the noise out of db catalog - the life of the key is the life of the user's connection just like any # temp object 
-:setvar SESSION_SYMMETRIC_KEY                  "#SessionSymmetricKey"   -- "<[SESSION_SYMMETRIC_KEY],SYSNAME,#SessionSymmetricKey>"                       
+:setvar WITH_OPTIONS                           "WITH EXECUTE AS CALLER" -- "<[WITH_OPTIONS],VARCHAR,WITH EXECUTE AS CALLER, ENCRYPTION>"         
+-- activation procedures always EXECUTE AS SPOKE_BROKER
+:setvar WITH_OPTIONS_FOR_ACTIVATION            ""                       -- "<[WITH_OPTIONS_FOR_ACTIVATION],VARCHAR,, ENCRYPTION>"                    
+-- ONLY PHRASE YOU MUST REMEMBER! personalized obfuscation, adds private encryption layer th    
+:setvar PRIVATE_ENCRYPTION_PHRASE              "y0ur secreT goes here!" -- "<[PASSPHRASE_ENCRYPTION_PHRASE],VARCHAR,y0ur secreT goes here!>"              
+-- key backups go here - read/write req'd by SQL Server service account. restores from hub are located in FileTable subfolder under this location
+-- Local path, shared storage of a Windows active-passive cluster, at primary replica of availability group 
+:setvar EXPORT_PATH                            "G:\"                    -- "<[EXPORT_PATH],SYSNAME,>"
+-- the life of the key is the life of the user's connection,  lives in tempdb like any # temp object 
+:setvar SESSION_SYMMETRIC_KEY                  "#SessionSymmetricKey"    -- "<[SESSION_SYMMETRIC_KEY],SYSNAME,#SessionSymmetricKey>"                       
 :setvar SESSION_KEY_SOURCE                     "SessionKeySource"       -- "<[SESSION_KEY_SOURCE],NVARCHAR,SessionKeySource>"                             
 :setvar SESSION_KEY_IDENTITY                   "SessionKeyIdentity"     -- "<[SESSION_KEY_IDENTITY],NVARCHAR,SessionKeyIdentity>"                         
-:setvar SESSION_KEY_ENCRYPTION_PHRASE          "not sent 2 CheckPhrase" -- "<[SESSION_KEY_ENCRYPTION_PHRASE],PASSPHRASE,not sent 2 CheckPhrase>"          
--- Crypto-container name and location (restored containers go to a FileTable in this folder)
-:setvar KEY_CONTAINER_PATH                     "G:\TrueCrypt\EHA\"      -- give Full Control to SQL Server service account                                
-:setvar KEY_CONTAINER_FILE                     "Container.eha"          -- truecrypt container already created at or copied to above path                 
-:setvar TRUECRYPT_EXE                          "G:\TrueCrypt\TrueCrypt.exe"  -- no need to install, just supply correct path to exe                       
-:setvar VHD_LETTER                             "X"                      -- drive letter inside encrypted container used by exports                        
--- phrase used to create container needed to mount VHD - will be save in NameValues
-:setvar TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE  "Yu&6Gf%3Fe12KOU X@wcf?" -- "<[TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE],SYSNAME,Yu&6Gf%3Fe12KOU X@wcf?>"     
--- master database encryption hierarchy (certificate is needed for TDE)  
+:setvar SESSION_KEY_ENCRYPTION_PHRASE          "NOT checked 4 hardness" -- "<[SESSION_KEY_ENCRYPTION_PHRASE],PASSPHRASE,NOT checked 4 hardness>"          
+-- master database encryption hierarchy (hierarchy for SPOKE_DATEBASE TDE certificate)  
 :setvar master_DMK_ENCRYPTION_PHRASE           "Qu&6G f%3Fe2DUOL@yc?f"  -- "<[master_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Qu&6G f%3Fe2DUOL@yc?f>"           
 :setvar master_DMK_BACKUP_PHRASE               "Vu&6Gf %3Fe3CVOR@xcf?"  -- "<[master_DMK_BACKUP_PHRASE],PASSPHRASE*,Vu&6Gf %3Fe3CVOR@xcf?>"               
 :setvar TDE_CERTIFICATE                        "TDECertificate"         -- "<[TDE_CERTIFICATE] - for EHDB TDE,SYSNAME,TDECertificate>"                    
@@ -78,10 +71,9 @@ GO
 :setvar AUDIT_CERTIFICATE_BACKUP_PHRASE        "Bu&6Gf%3F e14VUAP@wc?f" -- "<[AUDIT_CERTIFICATE_BACKUP_PHRASE],PASSPHRASE,Bu&6Gf%3F e14VUAP@wc?f>"        
 :setvar AUDIT_SYMMETRIC_KEY                    "AuditKey"               -- "<[AUDIT_SYMMETRIC_KEY],SYSNAME,AuditKey>"                                     
 :setvar AUDIT_KEY_ENCRYPTION_ALGORITHM         "AES_256"                -- "<[AUDIT_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_256>"                           
+:setvar AUDIT_TO                               "APPLICATION"            -- "<[AUDIT_TO],SYSNAME,APPLICATION|SECURITY>"                                    
 :setvar AUTHENTICITY_CERTIFICATE               "AuthenticityCertificate"-- "<[AUTHENTICITY_CERTIFICATE],SYSNAME,AuthenticityCertificate>                  
 :setvar AUTHENTICITY_CERTIFICATE_BACKUP_PHRASE "Ou&6Gf%3Fe11LO UD@wc?f" -- "<[AUTHENTICITY_CERTIFICATE_BACKUP_PHRASE],PASSPHRASE*,Ou&6Gf%3Fe11LO UD@wc?f>"
-:setvar CONTAINER_CERTIFICATE                  "ContainerCertificate"   -- "<[CONTAINER_CERTIFICATE] - sign a BLOB,SYSNAME,ContainerCertificate>          
-:setvar CONTAINER_CERTIFICATE_BACKUP_PHRASE    "8u&6Rf%3Fe54?L SUD@wcf" -- "<[OBJECT_CERTIFICATE_BACKUP_PHRASE],PHRASE*,8u&6Rf%3Fe54?L SUD@wcf>"          
 :setvar EHDB_DMK_BACKUP_PHRASE                 "Ru&6Gf%3F e6LOUD@wc?f"  -- "<[EHDB_DMK_BACKUP_PHRASE],PASSPHRASE*,Ru&6Gf%3F e6LOUD@wc?f>"                 
 :setvar EHDB_DMK_ENCRYPTION_PHRASE             "Memorize this 1 4 sure!"-- "<[EHDB_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Memorize this 1 4 sure!>"           
 :setvar ERROR_SYMMETRIC_KEY                    "ErrorKey"               -- "<[ERROR_SYMMETRIC_KEY],SYSNAME,ErrorKey>"                                     
@@ -91,15 +83,11 @@ GO
 :setvar ERROR_KEY_IDENTITY                     "t {bleS*&(d84vr4 67vfes"-- "<[ERROR_KEY_IDENTITY],PASSPHRASE*,t {bleS*&(d84vr4 67vfes>"                   
 :setvar EVENT_CERTIFICATE                      "EventCertificate"       -- "<[EVENT_CERTIFICATE],SYSNAME,EventCertificate>                                
 :setvar EVENT_CERTIFICATE_BACKUP_PHRASE        "oU7^gF5%fE!1lI ouD2WC/F"-- "<[EVENT_CERTIFICATE_BACKUP_PHRASE],PASSPHRASE*,oU7^gF5#fE!!l ouD2WC/F>"       
-:setvar EVENT_NOTIFICATION                     "DDLChanges"             -- "<[EVENT_NOTIFICATION],SYSNAME,DDLChanges>"
 :setvar FILE_CERTIFICATE                       "FileCertificate"        -- "<[FILE_CERTIFICATE],SYSNAME,FileCertificate>                                  
 :setvar FILE_CERTIFICATE_ENCRYPTION_PHRASE     "sd89f7ny*&NH 8E43BHFjh" -- "<[FILE_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,sd89f7ny*&NH 8E43BHFjh>"    
 :setvar FILE_CERTIFICATE_BACKUP_PHRASE         "d QW87!DtsHF387w$32VFw" -- "<[FILE_CERTIFICATE_BACKUP_PHRASE],PHRASE*,d QW87!DtsHF387w$32VFw>"            
 :setvar FILE_SYMMETRIC_KEY                     "FileKey"                -- "<[FILE_SYMMETRIC_KEY],SYSNAME,FileKey>"                                       
 :setvar FILE_KEY_ENCRYPTION_ALGORITHM          "AES_256"                -- "<[FILE_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_256>"                            
-:setvar HASHBYTES_ALGORITHM                    "SHA2_512"               -- "<[HASHBYTES_ALGORITHM],SYSNAME,SHA2_512>"                                     
-:setvar MESSAGE_OFFSET                         "21474836"               -- "<[MESSAGE_OFFSET] - between 500 and 21474836, INT,21474836>"                  
-:setvar MIN_PHRASE_LENGTH                      "21"                     -- "<[MIN_PHRASE_LENGTH] - Min phrase length (max is 128),TINYINT,21>"            
 :setvar NAME_CERTIFICATE                       "NameCertificate"        -- "<[OBJECT_CERTIFICATE],SYSNAME,NameCertificate>                                
 :setvar NAME_CERTIFICATE_ENCRYPTION_PHRASE     "Fe9 ROIT@wc?fZu&6Gf%3"  -- "<[OBJECT_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,Fe9 ROIT@wc?fZu&6Gf%3>"   
 :setvar NAME_CERTIFICATE_BACKUP_PHRASE         "Fe10L SUD@wcf?Lu&6Gf%3" -- "<[OBJECT_CERTIFICATE_BACKUP_PHRASE],PHRASE*,Fe10L SUD@wcf?Lu&6Gf%3>"          
@@ -109,124 +97,104 @@ GO
 :setvar OBJECT_CERTIFICATE_ENCRYPTION_PHRASE   "Lu&6Gf%3Fe9 ROIT@wc?f"  -- "<[OBJECT_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,Lu&6Gf%3Fe9 ROIT@wc?f>"   
 :setvar OBJECT_CERTIFICATE_BACKUP_PHRASE       "Zu&6Gf%3Fe10L SUD@wcf?" -- "<[OBJECT_CERTIFICATE_BACKUP_PHRASE],PHRASE*,Zu&6Gf%3Fe10L SUD@wcf?>"          
 :setvar SMK_BACKUP_PHRASE                      "Ku&6 Gf43Fe1 UIOE@zcf?" -- "<[SMK_BACKUP_PHRASE] Service Master Key,PASSPHRASE*,Ku&6 Gf43Fe1 UIOE@zcf?>"  
-:setvar USE_HASH_FOR_FILENAME                  "1"                      -- "<[USE_HASH_FOR_FILENAME],BIT,0>"                                              
 :setvar VALUE_CERTIFICATE                      "ValueCertificate"       -- "<[VALUE_CERTIFICATE],SYSNAME,ValueCertificate>"                               
 :setvar VALUE_CERTIFICATE_BACKUP_PHRASE        "Mu&6Gf%3Fe 8VKUA@wcf?"  -- "<[VALUE_CERTIFICATE_BACKUP_PHRASE],PASSPHRASE,Mu&6Gf%3Fe 8VKUA@wcf?>"         
 :setvar VALUE_SYMMETRIC_KEY                    "ValueKey"               -- "<[VALUE_SYMMETRIC_KEY],SYSNAME,ValueKey>"                                     
 :setvar VALUE_KEY_ENCRYPTION_ALGORITHM         "AES_256"                -- "<[VALUE_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_256>"                           
--- ODBC DSN  to offsite backup, if the DSN works the offsite processing should as well. 
-:setvar LINK_SERVER_ODBC_DSN                   "testHub"                -- "<[LINK_SERVER_ODBC_DSN],SYSNAME,testHub>"                                     
-:setvar LINK_SERVER                            "HubLinkedServer"        -- "<[LINK_SERVER],SYSNAME,HubLinkedServer>"                                      
-:setvar LINK_EHDB                              "ehdbHub"                -- "<[LINKED_EHDB],SYSNAME,ehdbHub>"                                              
-:setvar LINK_USER                              "bwunder"                -- "<[LINK_USER],SYSNAME,bwunder>"                                                
-:setvar LINK_PASSWORD                          "si*%tFE#4RfHgf"         -- "<[LINK_PASSWORD],SYSNAME,si*%tFE#4RfHgf>"                                     
--- DATABASE SCHEMA 
--- Spoke only
-:setvar EHADMIN_ROLE                           "EHAdminRole"           
-:setvar EHDB                                   "ehdb"                  
-:setvar FILESTREAM_FILEGROUP                   "FILESTREAMS"           
-:setvar FILESTREAM_FILE                        "ehdb_filestreams"      
-:setvar FILETABLE_BACKUPS                      "Backups"               
-:setvar FILETABLE_DIRECTORY                    "ehdb_filetables"       
-:setvar RESTORE_FILETABLE                      "Restores"              
--- common to hub and spoke
-:setvar EHA_SCHEMA                             "eha"                   
-:setvar BOOKINGS_TABLE                         "Bookings"              
-:setvar BACKUP_ACTIVITY_TABLE                  "BackupActivity"        
-:setvar CONTAINERS_TABLE                       "Containers"            
-:setvar CONTAINER_ACTIVITY_TABLE               "ContainerActivity"     
-:setvar NOTIFICATION_ACTIVITY_TABLE            "NotificationActivity"  
-:setvar NAMEVALUES_TABLE                       "NameValues"            
-:setvar NAMEVALUE_ACTIVITY_TABLE               "NameValueActivity"     
-:setvar OFFSITE_ACTIVITY_TABLE                 "OffsiteActivity"       
-:setvar REPORT_ACTIVITY_TABLE                  "ReportActivity"        
--- local synonym for hub tables
-:setvar LINK_BOOKINGS_SYNONYM                  "zBookings"             
-:setvar LINK_BACKUP_ACTIVITY_SYNONYM           "zBackupActivity"       
-:setvar LINK_CONTAINERS_SYNONYM                "zContainers"           
-:setvar LINK_CONTAINER_ACTIVITY_SYNONYM        "zContainerActivity"    
-:setvar LINK_NAMEVALUES_SYNONYM                "zNameValues"           
-:setvar LINK_NAMEVALUE_ACTIVITY_SYNONYM        "zNameValueActivity"    
-:setvar LINK_NOTIFICATION_ACTIVITY_SYNONYM     "zNotificationActivity" 
-:setvar LINK_OFFSITE_ACTIVITY_SYNONYM          "zOffsiteActivity"      
-:setvar LINK_REPORT_ACTIVITY_SYNONYM           "zReportActivity"       
--- compared to catalog in OpenSession to verify unchanged since install
-:setvar OBJECT_COUNT                           "62"                    -- schema object count from sys.objects
-:setvar TABLE_COUNT                            "10"                    -- schema synonym count from sys.synoyms
+
+:setvar HASHBYTES_ALGORITHM                    "SHA2_512"               -- "<[HASHBYTES_ALGORITHM],SYSNAME,SHA2_512>"                                     
+-- this value times 100 is used as the floor for 50 messages from sys.messages
+:setvar MESSAGE_OFFSET                         "21474836"               -- "<[MESSAGE_OFFSET] - between 500 and 21474836, INT,21474836>"                  
+:setvar MIN_PHRASE_LENGTH                      "21"                     -- "<[MIN_PHRASE_LENGTH] - Min phrase length (max is 128),TINYINT,21>"            
+-- for run-time schema validation - must be correct and unchanged since install or last valid update   
+:setvar OBJECT_COUNT                           58                       -- "<[OBJECT_COUNT],INT,58>"                                                      
+:setvar DELTA                                  10                       -- "<[DELTA],INT,10>"                                                        
+-- number of active traces allowed during a white listed proc's execution (if default trace enabled set to 1)
+:setvar MAX_TRACE_COUNT                        1                        -- "<[MAX_TRACE_COUNT,TINYINT,1>"                                                 
+-- use the namebucket for the file name (1) or the clear text (0)
+:setvar USE_HASH_FOR_FILENAME                  "1"                      -- "<[USE_HASH_FOR_FILENAME],BIT,0>"                                              
+-- prefix for event notifications
+:setvar EVENT_NOTIFICATION                     "DDLChanges"             -- "<[EVENT_NOTIFICATION],SYSNAME,DDLChanges>"                                    
+-- time to wait between data changes pushes to hub
+:setvar TIMER_TIMEOUT                          120                     -- "<[TIMER_TIMEOUT],SECONDS,120>                                                
+-- uses DATASOURCE if SQL Azure SERVER_NAME if on-premise, virtual machine or private cloud 
+:setvar HUB_DATASOURCE                         "Hub"                    -- "<[HUB_DATASOURCE],SYSNAME,Hub>"                                               
+:setvar HUB_SERVER_NAME                        "BWUNDER-PC\ELEVEN"      -- "<[HUB_DATASOURCE],SYSNAME,Hub>"                                               
+-- copy setvars below to UnistallSpoke.sql
+:setvar HUB_LINKED_SERVER_NAME                 "Hub"                    -- "<[HUB_LINKED_SERVER_NAME],SYSNAME,Hub>"                                       
+-- synonyms
+:setvar BOOKINGS_SYNONYM                       "zBookings"             
+:setvar BACKUPS_SYNONYM                        "zBackups"              
+:setvar BACKUP_ACTIVITY_SYNONYM                "zBackupActivity"       
+:setvar HUB_ACTIVITY_SYNONYM                   "zHubActivity"          
+:setvar NAMEVALUES_SYNONYM                     "zNameValues"           
+:setvar NAMEVALUE_ACTIVITY_SYNONYM             "zNameValueActivity"    
+:setvar NOTIFICATION_ACTIVITY_SYNONYM          "zNotificationActivity" 
+:setvar SPOKE_ACTIVITY_SYNONYM                 "zSpokeActivity"          
+:setvar REPORT_ACTIVITY_SYNONYM                "zReportActivity"       
 --- export file extensions                                              
 :setvar MASTER_KEY_BACKUP_EXT                  ".keybak"               
 :setvar PRIVATE_KEY_BACKUP_EXT                 ".prvbak"               
 :setvar PUBLIC_KEY_BACKUP_EXT                  ".cerbak"               
-:setvar ALLOW_TRACE_COUNT                      1                       
+-- copy setvars below to InstallHub.sql
+-- principals 
+:setvar SPOKE_ADMIN                            "SpokeAdmin"            -- "<[SPOKE_ADMIN],SYSNAME,SpokeAdmin>"                   
+:setvar SPOKE_ADMIN_PASSWORD                   "sj*%tFE#4RfHgf"        -- "<[SPOKE_ADMIN_PASSWORD],PASSPHRASE,sj*%tFE#4RfHgf>"   
+:setvar SPOKE_BROKER                           "SpokeBroker"           -- "<[SPOKE_BROKER],SYSNAME,SpokeBroker>"                 
+:setvar SPOKE_BROKER_PASSWORD                  "sk*%tFE#4RfHge"        -- "<[SPOKE_BROKER_PASSWORD],PASSPHRASE,sk*%tFE#4RfHge>"  
+--databases
+:setvar SPOKE_DATABASE                         "ehdb"                  -- "<[SPOKE_DATABASE],SYSNAME,ehdb>"                      
+:setvar HUB_DATABASE                           "ehHub"                 
+-- schema
+:setvar EHA_SCHEMA                             "eha"                   
+-- roles
+:setvar HUB_ADMIN_ROLE                         "HubAdministrators"     
+:setvar SPOKE_ADMIN_ROLE                       "SpokedAdministrators"  
+:setvar SPOKE_BROKER_ROLE                      "SpokeBrokers"          
+-- tables
+:setvar BOOKINGS_TABLE                         "Bookings"              
+:setvar BACKUPS_TABLE                          "Backups"               
+:setvar BACKUP_ACTIVITY_TABLE                  "BackupActivity"        
+:setvar HUB_ACTIVITY_TABLE                     "HubActivity"           -- created on hub only  
+:setvar NAMEVALUES_TABLE                       "NameValues"            
+:setvar NAMEVALUE_ACTIVITY_TABLE               "NameValueActivity"     
+:setvar NOTIFICATION_ACTIVITY_TABLE            "NotificationActivity"  
+:setvar SPOKE_ACTIVITY_TABLE                   "SpokeActivity"         
+:setvar REPORT_ACTIVITY_TABLE                  "ReportActivity"        
+-- filetable
+:setvar FILESTREAM_FILEGROUP                   "FilestreamFileGroup"   
+:setvar FILESTREAM_FILE                        "FilestreamFile"        
+:setvar FILETABLE_DIRECTORY                    "FiletableDirectory"    
+:setvar RESTORES_FILETABLE                     "Restores"              
 GO  
-
--- created ODBC DSN using ODBCad32.exe or application
-IF NOT EXISTS (SELECT * FROM sys.servers
-               WHERE NAME = N'$(LINK_SERVER)' )
-  EXEC master.dbo.sp_addlinkedserver @server = N'$(LINK_SERVER)'
-                                   , @srvproduct = N'Any'
-                                   , @provider=N'MSDASQL'
-                                   , @datasrc=N'$(LINK_SERVER_ODBC_DSN)'; 
+IF LEFT('$(SPOKE_DATABASE)',1) = '$' AND PATINDEX('%Management Studio%', APP_NAME() ) > 0
+  RAISERROR('Execute this script using SSMS query window in SQLCMD mode.',16,1);
 GO
-IF NOT EXISTS (SELECT * 
-               FROM sys.linked_logins l
-               JOIN sys.servers s
-               ON l.server_id = s.server_id
-               WHERE s.name = N'$(LINK_SERVER)' 
-               AND l.remote_name = N'$(LINK_USER)')
-  EXEC master.dbo.sp_addlinkedsrvlogin @rmtsrvname = N'$(LINK_SERVER)'
-                                     , @useself = N'False'
-                                     , @locallogin = NULL -- all comers
-                                     , @rmtuser = N'$(LINK_USER)'
-                                     , @rmtpassword='$(LINK_PASSWORD)';
-GO
--- if truecrypt cannot dismount any existing drive $(VHD_LETTER) the script will stop
-:!!if exist $(VHD_LETTER):\) "$(TRUECRYPT_EXE)" /q /s /d X /f)\           
-GO
-:!!$(TRUECRYPT_EXE) /v $(KEY_CONTAINER_PATH)$(KEY_CONTAINER_FILE) /l$(VHD_LETTER) /p "$(TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE)" /q /s /m
+IF LEFT('$(SESSION_SYMMETRIC_KEY)',1) <> '#'
+  RAISERROR('The SESSION_SYMMETRIC_KEY must be a session scoped temporary object (e.g., prefixed with one "#" character).',16,1);
 GO
 USE master;
 GO
-IF LEFT('$(EHDB)',1) = '$'
-  RAISERROR('Enable the SSMS Query menu item "SQLCMD Mode" option before executing this script.',16,1);
-GO
+IF ISNULL(PARSENAME ( CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion')) , 4 ), 0) < 11
+  RAISERROR('SQL Server 2012 or later is required.',16, 1);
 IF NOT EXISTS( SELECT * 
                FROM sys.server_principals 
                WHERE name = ORIGINAL_LOGIN() 
                AND type = 'U'
                AND IS_SRVROLEMEMBER('sysadmin') = 1 )
   RAISERROR('A Windows authenticated member of the sysadmin fixed server role must execute this script.',16, 1);
-GO      
-IF ISNULL(PARSENAME ( CONVERT(NVARCHAR(128), SERVERPROPERTY('ProductVersion')) , 4 ), 0) < 11
-  RAISERROR('SQL Server 2012 or later is required.',16, 1);
-GO
 -- self-signed certificates are easier prey for authentication relay exploits (aka man in the middle)
 IF (SELECT UPPER(encrypt_option) FROM sys.dm_exec_connections WHERE session_id = @@spid) = 'FALSE'
-  RAISERROR('Consider a self signed certificate if SSL is unavailable. Unencrypted connections risk data exposure on the wire.  see http://msdn.microsoft.com/en-us/library/ms191192.aspx' ,0 ,0);
-GO
+  RAISERROR('Consider a server signed certificate if SSL is unavailable. Unencrypted connections increase risks for data exposure on the wire.  see http://msdn.microsoft.com/en-us/library/ms191192.aspx' ,0 ,0);
 -- Configure filestream at install or in SQL Configuration Manger
 -- Enable the configuration using sp_configure 'filestream access level', 2; RECONFIGURE;
 IF NOT EXISTS ( SELECT * FROM sys.configurations 
                 WHERE name = 'filestream access level'
                 AND value = 2)
   RAISERROR('FILESTREAM for Transact-SQL and Win32 streaming access must be configured and enabled.',16, 1);
-GO
 RAISERROR('Verify that no key-logging device or software has captured your PASSPHRASEs  see http://wskills.blogspot.com/2007/01/how-to-find-fight-keyloggers.html and http://msdn.microsoft.com/en-us/library/ff648641.aspx',0,0);
-GO
 IF NOT ($(MESSAGE_OFFSET) BETWEEN 500 AND 21474836)
   RAISERROR('MESSAGE_OFFSET must be between 500 and 21474836.',16, 1);
-GO
---  only TDE capable - e.g. Developer, Enterprise, and Data Center SKUs
-IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0 
-  BEGIN
-    -- Certificate in master for TDE encrypted by master DMK (which is encrypted by the SMK (DPAPI)) 
-    IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE symmetric_key_id = 101)
-      CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$(master_DMK_ENCRYPTION_PHRASE)'
-    ELSE 
-      OPEN MASTER KEY DECRYPTION BY PASSWORD = '$(master_DMK_ENCRYPTION_PHRASE)';
-    IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(TDE_CERTIFICATE)')
-      CREATE CERTIFICATE $(TDE_CERTIFICATE) WITH SUBJECT = '$(EHDB) TDE DEK';
-  END
 GO
 IF (SELECT value FROM sys.configurations
     WHERE name = 'clr enabled') <> 1
@@ -245,13 +213,410 @@ AND PATINDEX( '%[Developer,Enterprise]%'
     RAISERROR('The "max text repl size (B)" configuration option is set to -1',0,0);
   END
 GO
-IF DB_ID('$(EHDB)') IS NULL
-  CREATE DATABASE $(EHDB); 
+IF DB_ID('$(SPOKE_DATABASE)') IS NULL
+  CREATE DATABASE $(SPOKE_DATABASE); 
 GO
-USE $(EHDB);
+USE $(SPOKE_DATABASE);
 GO
-IF DB_NAME() <> '$(EHDB)' 
-  RAISERROR('Database $(EHDB) not found. Script aborted.',16, 1);
+IF DB_NAME() <> '$(SPOKE_DATABASE)' 
+  RAISERROR('Database $(SPOKE_DATABASE) not found. Script aborted.',16, 1);
+GO
+IF SCHEMA_ID('$(EHA_SCHEMA)') IS NULL
+  BEGIN
+    EXEC sp_executesql N'CREATE SCHEMA [$(EHA_SCHEMA)]';
+    -- with Common Criteria enabled this overrides any column level GRANT too 
+    DENY SELECT, INSERT, UPDATE, DELETE ON SCHEMA::$(EHA_SCHEMA) TO PUBLIC;
+  END
+GO
+-- used for tvps to pass encrypted name/value 
+IF TYPE_ID('NAMEVALUETYPE') IS NULL
+  CREATE TYPE NAMEVALUETYPE AS TABLE
+	  ( Name VARBINARY(8000) NOT NULL
+	  , Value VARBINARY(8000) NOT NULL ); 	 
+GO
+-------------------------------------------------------------------------------
+-- Service Broker - 
+------------------------------------------------------------------------------- 
+-- DDL events, data changes and key backup files are sent to hub
+-- events are examined for work tasks and written to NOTIFICATION_ACTIVITY at Spoke
+-- change data capture ending lsn by Capture Instance is sent through queue
+-- and 
+-- backup file Backup Id is sent through queue
+------------------------------------------------------------------------------- 
+IF OBJECT_ID ('$(EHA_SCHEMA).InitiatorActivation') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).InitiatorActivation
+GO
+-------------------------------------------------------------------------------
+--    bwunder at yahoo dot com
+--    Desc: process replys from target queue
+-------------------------------------------------------------------------------
+CREATE PROCEDURE $(EHA_SCHEMA).InitiatorActivation 
+WITH EXECUTE AS '$(SPOKE_BROKER)' $(WITH_OPTIONS_FOR_ACTIVATION)
+AS
+BEGIN
+DECLARE @ConversationHandle UNIQUEIDENTIFIER
+      , @ConversationGroupId UNIQUEIDENTIFIER
+      , @ConversationGroup NVARCHAR(50)
+      , @ErrorData VARBINARY(8000)
+      , @Id NCHAR(36)
+      , @MAC VARBINARY(128)
+      , @MessageBody VARBINARY(MAX)
+      , @MessageTypeName NVARCHAR(128)
+      , @Parameters VARBINARY(8000)
+      , @ReturnCode INT
+      , @ServiceName NVARCHAR(128)
+      , @tvp NAMEVALUETYPE
+      , @Version INT ; -- AddNameValue output parameter
+SET NOCOUNT ON;
+  BEGIN TRY
+    WAITFOR ( GET CONVERSATION GROUP @ConversationGroupId 
+              FROM $(EHA_SCHEMA).TargetQueue )
+        , TIMEOUT 6000; -- a minute 
+    IF @ConversationGroupId IS NOT NULL
+      BEGIN
+        RECEIVE TOP(1)
+            @ConversationHandle = [conversation_handle]
+          , @ServiceName = [service_name]
+          , @MessageTypeName = [message_type_name]
+          , @MessageBody = [message_body]
+        FROM $(EHA_SCHEMA).$(EHA_SCHEMA)InitiatorQueue
+        WHERE conversation_group_id = @ConversationGroupId;
+        IF @@ROWCOUNT = 1 
+          BEGIN  
+            -- write notification row for each queue item processed
+            EXEC $(EHA_SCHEMA).OpenSession;
+ 	          SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                          , N''
+                                          , 1
+                                          , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
+            CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
+            EXEC $(EHA_SCHEMA).Book @@PROCID
+                                  , @Parameters
+                                  , @Id OUTPUT
+                                  , @MAC OUTPUT; 
+            IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                            WHERE Id = @Id
+                            AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                            AND ObjectName = OBJECT_NAME(@@PROCID) 
+                            AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                                  , CAST(CHECKSUM( Id
+                                                                  , @@PROCID   
+                                                                  , ObjectName
+                                                                  , @Parameters
+                                                                  , KeyGuid
+                                                                  , Status ) AS NVARCHAR(128) )
+                                                  , @MAC ) = 1 ) 
+              RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);                      
+            IF @MessageTypeName = 'http://schemas.microsoft.com/SQL/ServiceBroker/EndDialog'
+              -- Target is ending dialog normally.
+              END CONVERSATION @ConversationHandle;
+            ELSE IF @MessageTypeName = 'http://schemas.microsoft.com/SQL/ServiceBroker/Error'
+              WITH XMLNAMESPACES ('http://schemas.microsoft.com/SQL/ServiceBroker/Error' AS ssb) 
+              SELECT @ErrorData = ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
+                                              , FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                                                             , err.value( '(//ssb:Error/ssb:Code)[1]'
+                                                                         , 'INT' ) 
+                                                             , NULL
+                                                             , NULL
+                                                             , @MessageTypeName
+                                                             , NULL
+                                                             , err.value( '(//ssb:Error/ssb:Description)[1]'
+                                                                       , 'NVARCHAR(4000)' ) )
+                                               , 1
+                                               , @Id ) 
+              FROM (SELECT CAST(@MessageBody AS XML) AS err) AS derived;
+            ELSE -- did not succeed, did not fail? Why are we here?
+              BEGIN 
+                RAISERROR( 'Unexpected message type [%s] from service [%s] in [$(EHA_SCHEMA).InitiatorQueue].'
+                         , 16
+                         , 1
+                         , @MessageTypeName
+                         , @ServiceName);
+                
+              END
+            INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
+              ( Id
+              , ConversationGroupId 
+              , ConversationHandle
+              , Message
+              , Signature
+              , MAC
+              , Action
+              , Status 
+              , ErrorData)
+            SELECT @Id
+                 , ISNULL( @ConversationGroupId, 0x0 ) 
+                 , ISNULL( @ConversationHandle, 0x0 )
+                 , ISNULL( @MessageBody, 0x0 )
+                 , ISNULL( SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
+                                     , CAST( @MessageBody AS XML ).value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
+                          , 0x0 )     
+                 , ISNULL( @MAC, 0x0 )
+                 , OBJECT_NAME( @@PROCID )
+                 , 'Complete'
+                 , @ErrorData ;
+              CLOSE ALL SYMMETRIC KEYS;
+          END -- there is a dialog item to process
+      END -- conversation group exists
+  END TRY
+  BEGIN CATCH
+    IF @@TRANCOUNT > 0
+      ROLLBACK TRANSACTION
+    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
+    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
+    INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
+      ( Id
+      , ConversationGroupId 
+      , ConversationHandle
+      , Message
+      , Signature
+      , MAC
+      , Action
+      , Status 
+      , ErrorData)
+    SELECT @Id
+         , ISNULL( @ConversationGroupId, 0x0 ) 
+         , ISNULL( @ConversationHandle, 0x0 )
+         , ISNULL( @MessageBody, 0x0 )
+         , ISNULL( SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
+                             , CAST( @MessageBody AS XML ).value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
+                  , 0x0 )     
+         , ISNULL( @MAC, 0x0 )
+         , OBJECT_NAME( @@PROCID )
+         , 'Complete'
+         , ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
+                       , ErrorInfo 
+                       , 1
+                       , @Id )
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                              , ERROR_NUMBER()
+                              , ERROR_SEVERITY()
+                              , ERROR_STATE()
+                              , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
+                              , ERROR_LINE()
+                              , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
+    CLOSE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY);
+  END CATCH
+END
+GO
+IF OBJECT_ID ('$(EHA_SCHEMA).TargetActivation') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).TargetActivation
+GO
+-------------------------------------------------------------------------------
+--    Desc: handles event notification, data change and backup offload messages
+-------------------------------------------------------------------------------
+CREATE PROCEDURE $(EHA_SCHEMA).TargetActivation 
+WITH EXECUTE AS '$(SPOKE_BROKER)' $(WITH_OPTIONS_FOR_ACTIVATION)
+AS
+BEGIN
+DECLARE @BackupId NVARCHAR(36)
+      , @ConversationHandle UNIQUEIDENTIFIER
+      , @ConversationGroupId UNIQUEIDENTIFIER
+      , @ConversationGroup NVARCHAR(50)
+      , @ErrorData VARBINARY(8000)
+      , @EventType NVARCHAR(128)
+      , @Id NCHAR(36)
+      , @MAC VARBINARY(128)
+      , @MessageBody VARBINARY(MAX)
+      , @MessageTypeName NVARCHAR(128)
+      , @Parameters VARBINARY(8000)
+      , @ReturnCode INT
+      , @ServiceName NVARCHAR(128)
+      , @Timeout INT = $(TIMER_TIMEOUT)
+      , @tvp NAMEVALUETYPE
+      , @Version INT ; -- AddNameValue output parameter
+SET NOCOUNT ON;
+  BEGIN TRY
+      WAITFOR ( GET CONVERSATION GROUP @ConversationGroupId 
+                FROM $(EHA_SCHEMA).TargetQueue )
+          , TIMEOUT 6000; -- a minute - the session keys are open for this
+      IF @ConversationGroupId IS NOT NULL
+        BEGIN
+          RECEIVE TOP(1)
+              @ConversationHandle = [conversation_handle]
+            , @ServiceName = [service_name]
+            , @MessageTypeName = [message_type_name]
+            , @MessageBody = [message_body]
+          FROM $(EHA_SCHEMA).TargetQueue
+          WHERE conversation_group_id = @ConversationGroupId;
+          IF @@ROWCOUNT = 1 
+            BEGIN  
+              -- book and write notification row for each queue item processed
+              EXEC $(EHA_SCHEMA).OpenSession;
+ 	            SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                            , FORMATMESSAGE( 'service_name ''%s'' message_type_name ''%s'''
+                                                           , @ServiceName
+                                                           , @MessageTypeName )
+                                            , 1
+                                            , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
+              CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
+              EXEC $(EHA_SCHEMA).Book @@PROCID
+                                    , @Parameters
+                                    , @Id OUTPUT
+                                    , @MAC OUTPUT; 
+              IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                              WHERE Id = @Id
+                              AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                              AND ObjectName = OBJECT_NAME(@@PROCID) 
+                              AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                                    , CAST(CHECKSUM( Id
+                                                                    , @@PROCID   
+                                                                    , ObjectName
+                                                                    , @Parameters
+                                                                    , KeyGuid
+                                                                    , Status ) AS NVARCHAR(128) )
+                                                    , @MAC ) = 1 ) 
+                RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+
+              -- all this proc should do is write the event notifications the spoke    
+              --IF @MessageTypeName = 'http://schemas.microsoft.com/SQL/Notifications/EventNotification'
+              --SET @EventType = CAST( @MessageBody AS XML ).value('(/EVENT_INSTANCE/EventType)[1]','NVARCHAR(128)');
+              IF @MessageTypeName = '//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Backup' 
+                BEGIN
+                  --SET @BackupId = CAST( @MessageBody AS NVARCHAR(36) );
+                  EXEC $(EHA_SCHEMA).OffloadBackup @BackupId = @MessageBody;
+                END
+              ELSE IF @MessageTypeName = '//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/DataChanges'
+              -- if many changes, uncomment the timer to send changes to hub in sets 
+                BEGIN
+                  -- timer is started on local queue
+                  IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).TargetQueue
+                                  WHERE message_type_name = 'http://schemas.microsoft.com/SQL/ServiceBroker/DialogTimer' )
+                    BEGIN CONVERSATION TIMER ( @ConversationHandle ) TIMEOUT = 120; 
+                END
+              ELSE IF @MessageTypeName = 'http://schemas.microsoft.com/SQL/ServiceBroker/DialogTimer'
+                EXEC $(EHA_SCHEMA).PushChanges;
+              
+              INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
+                ( Id
+                , ConversationGroupId 
+                , ConversationHandle
+                , Message
+                , Signature
+                , MAC
+                , Action
+                , Status )
+              VALUES ( @Id
+                      , @ConversationGroupId 
+                      , @ConversationHandle
+                      , @MessageBody
+                      , SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
+                                  , @MessageBody )
+                      , @MAC
+                      , OBJECT_NAME(@@PROCID)
+                      , 'Complete' );
+            END -- there is a dialog item to process
+        END -- conversation group exists
+      CLOSE ALL SYMMETRIC KEYS;
+  END TRY
+  BEGIN CATCH
+    IF @@TRANCOUNT > 0
+      ROLLBACK TRANSACTION
+    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
+    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
+    INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
+      ( Id
+      , ConversationGroupId 
+      , ConversationHandle
+      , Message
+      , Signature
+      , MAC
+      , Action
+      , Status 
+      , ErrorData)
+    SELECT @Id
+         , ISNULL( @ConversationGroupId, 0x0 ) 
+         , ISNULL( @ConversationHandle, 0x0 )
+         , ISNULL( @MessageBody, 0x0 )
+         , ISNULL( SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
+                             , CAST( @MessageBody AS XML ).value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
+                  , 0x0 )     
+         , ISNULL( @MAC, 0x0 )
+         , OBJECT_NAME( @@PROCID )
+         , 'Complete'
+         , ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
+                       , ErrorInfo 
+                       , 1
+                       , @Id )
+    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                              , ERROR_NUMBER()
+                              , ERROR_SEVERITY()
+                              , ERROR_STATE()
+                              , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
+                              , ERROR_LINE()
+                              , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
+    CLOSE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY);
+  END CATCH
+END
+GO
+CREATE MESSAGE TYPE [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Backup] VALIDATION = WELL_FORMED_XML;
+CREATE MESSAGE TYPE [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/DataChanges] VALIDATION = EMPTY;
+CREATE MESSAGE TYPE [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Reply] VALIDATION = WELL_FORMED_XML;
+GO
+CREATE CONTRACT [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/SendtoHub]
+  ( [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Backup] SENT BY INITIATOR
+  , [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/DataChanges] SENT BY INITIATOR
+  , [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Reply] SENT BY TARGET )  
+GO
+IF SUSER_SID ( '$(SPOKE_ADMIN)' ) IS NULL
+  CREATE LOGIN $(SPOKE_ADMIN) WITH PASSWORD = '$(SPOKE_ADMIN_PASSWORD)';  
+IF USER_ID ('$(SPOKE_ADMIN)') IS NULL
+  CREATE USER $(SPOKE_ADMIN) FROM LOGIN $(SPOKE_ADMIN);  
+IF USER_ID ('$(SPOKE_BROKER)') IS NULL
+  CREATE USER $(SPOKE_BROKER) WITHOUT LOGIN;  
+GO
+IF NOT EXISTS ( SELECT * FROM sys.service_queues 
+                WHERE name = 'InitiatorQueue'
+                AND schema_id = SCHEMA_ID( '$(EHA_SCHEMA)' ) ) 
+  CREATE QUEUE $(EHA_SCHEMA).InitiatorQueue 
+  WITH RETENTION = ON
+     , ACTIVATION ( STATUS = ON
+                  , PROCEDURE_NAME = $(EHA_SCHEMA).InitiatorActivation
+                  , MAX_QUEUE_READERS = 1
+                  , EXECUTE AS '$(SPOKE_BROKER)' ) ;
+GO
+IF NOT EXISTS ( SELECT * FROM sys.services 
+                WHERE name = '$(EHA_SCHEMA)InitiatorService' )
+  CREATE SERVICE $(EHA_SCHEMA)InitiatorService AUTHORIZATION [$(SPOKE_ADMIN)]
+  ON QUEUE $(EHA_SCHEMA).InitiatorQueue 
+    ( [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/SendtoHub] );
+GO
+
+IF NOT EXISTS ( SELECT * FROM sys.service_queues 
+                WHERE name = 'TargetQueue'
+                AND schema_id = SCHEMA_ID( '$(EHA_SCHEMA)' ) ) 
+  CREATE QUEUE $(EHA_SCHEMA).TargetQueue 
+  WITH RETENTION = ON
+     , ACTIVATION ( STATUS = OFF
+                  , PROCEDURE_NAME = $(EHA_SCHEMA).TargetActivation
+                  , MAX_QUEUE_READERS = 1
+                  , EXECUTE AS '$(SPOKE_BROKER)' ) ;
+GO
+
+IF NOT EXISTS ( SELECT * FROM sys.services 
+                WHERE name = '$(EHA_SCHEMA)TargetService' )
+  CREATE SERVICE $(EHA_SCHEMA)TargetService AUTHORIZATION [$(SPOKE_ADMIN)]
+  ON QUEUE $(EHA_SCHEMA).TargetQueue 
+    ( [http://schemas.microsoft.com/SQL/Notifications/PostEventNotification] 
+    , [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/SendtoHub]);
+GO
+IF NOT EXISTS (SELECT * FROM sys.event_notifications WHERE name = '$(EVENT_NOTIFICATION)Db')
+  CREATE EVENT NOTIFICATION $(EVENT_NOTIFICATION)Db 
+  ON DATABASE 
+  FOR DDL_DATABASE_LEVEL_EVENTS 
+  TO SERVICE '$(EHA_SCHEMA)TargetService', 'current database' ;
+GO
+IF NOT EXISTS (SELECT * FROM sys.server_event_notifications WHERE name = '$(EVENT_NOTIFICATION)Srv')
+  CREATE EVENT NOTIFICATION $(EVENT_NOTIFICATION)Srv 
+  ON SERVER 
+  FOR AUDIT_DATABASE_OBJECT_MANAGEMENT_EVENT
+    , ALTER_CERTIFICATE
+    , CREATE_CERTIFICATE
+    , ALTER_MASTER_KEY
+    , CREATE_MASTER_KEY
+    , ALTER_SERVICE_MASTER_KEY  
+  TO SERVICE '$(EHA_SCHEMA)TargetService', 'current database' ;
+
 GO
 -- no need to persist EHAdmin objects in the plan cache, Auto close will clear the db from 
 -- sys.dm_exec_query_stats also some risk that leaving an idle database 
@@ -262,25 +627,19 @@ GO
 -- if hijacked in an elevation of authority attack 
 -- setting the UI to auto disconnect from the database after each execution is also worth considering
 -- In a busy database AUTO_CLOSE offers no real advantage, just creates an ocassional very slow connection to open. 
-ALTER DATABASE $(EHDB) SET AUTO_CLOSE ON;    
+ALTER DATABASE $(SPOKE_DATABASE) SET AUTO_CLOSE ON;    
 GO
 -- intended for use only by mad scientists at M$ labs and the catatonically insane me thinks
-ALTER DATABASE $(EHDB) SET TRUSTWORTHY OFF;    
+ALTER DATABASE $(SPOKE_DATABASE) SET TRUSTWORTHY OFF;    
 GO
 -- prevents elevation of authority attacks by users connected to other databases within the SQL Server 
-ALTER DATABASE $(EHDB) SET DB_CHAINING OFF; 
+ALTER DATABASE $(SPOKE_DATABASE) SET DB_CHAINING OFF; 
 GO
 -- provides the ability to review state after the fact using point-in-time restore
-ALTER DATABASE $(EHDB) SET RECOVERY FULL;  
+ALTER DATABASE $(SPOKE_DATABASE) SET RECOVERY FULL;  
 GO
---FILETABLE does not like SNAPSHOT - must use WITH (READCOMMITTED LOCKS_ hint to query
-ALTER DATABASE $(EHDB) SET READ_COMMITTED_SNAPSHOT ON;
-GO
--- allow only db_owner dbcreator, sysadmin fixed server role members 
--- this assure there can be no valid role members because the only valid
--- databased scoped identity is always going to be 'dbo' - BUT just because
--- a user is dbo does not mean they have the phrase needed to open the DMK
-ALTER DATABASE $(EHDB) SET RESTRICTED_USER; 
+--FileTable does not like row versioning - always use WITH (READCOMMITTED LOCKS_ hint to query the FileTable
+ALTER DATABASE $(SPOKE_DATABASE) SET READ_COMMITTED_SNAPSHOT ON;
 GO
 -- move dbo to sa so no conflicts when current user added to role
 -- sa should also be disabled, and may also be renamed 
@@ -289,7 +648,7 @@ IF (SELECT owner_sid FROM sys.databases where name = DB_NAME()) <> 0x01
   BEGIN
     DECLARE @Name NVARCHAR(128), @ChangeDbOwnerDDL NVARCHAR(128);
     SET @Name = (SELECT name FROM sys.server_principals WHERE sid = 0x01);
-    SET @ChangeDbOwnerDDL = 'ALTER AUTHORIZATION ON DATABASE::$(EHDB) TO ' + @Name;
+    SET @ChangeDbOwnerDDL = 'ALTER AUTHORIZATION ON DATABASE::$(SPOKE_DATABASE) TO ' + @Name;
     IF @Name = 'sa'
       RAISERROR('Consider renaming login [sa].  see http://blogs.msdn.com/b/data_otaku/archive/2011/06/22/secure-the-authentication-process.aspx', 0, 0);
     IF (SELECT is_disabled FROM sys.server_principals WHERE sid = 0x01) = 0
@@ -304,39 +663,98 @@ IF (SELECT owner_sid FROM sys.databases where name = DB_NAME()) <> 0x01
     -- also enabled login auditing and hardens security in memory
     IF ( SELECT value FROM sys.configurations
          WHERE name = 'common criteria compliance enabled' ) <> 1
-      RAISERROR('Consider enabling Common Criteria (CC) compliance, even if you do not enable the CC Trace.  see http://msdn.microsoft.com/en-us/library/bb326650(v=SQL.110).aspx', 0, 0);
+      RAISERROR('Consider enabling Common Criteria (CC) compliance, even if you do not download, install and enable the Common Criteria Trace.  see http://msdn.microsoft.com/en-us/library/bb326650(v=SQL.110).aspx', 0, 0);
     EXEC sp_executesql @ChangeDbOwnerDDL; 
   END
 GO
+
+IF NOT EXISTS ( SELECT * FROM sys.database_principals 
+                WHERE name = N'$(SPOKE_ADMIN_ROLE)' 
+                AND type = 'R')
+  CREATE ROLE [$(SPOKE_ADMIN_ROLE)]
+
+GRANT SELECT, INSERT ON SCHEMA::$(EHA_SCHEMA) TO $(SPOKE_ADMIN_ROLE);
+DENY UPDATE, DELETE ON SCHEMA::$(EHA_SCHEMA) TO $(SPOKE_ADMIN_ROLE);
+
+ALTER ROLE [$(SPOKE_ADMIN_ROLE)]
+ADD MEMBER $(SPOKE_ADMIN);
+
+IF NOT EXISTS ( SELECT * FROM sys.database_principals 
+                WHERE name = N'$(SPOKE_BROKER_ROLE)' 
+                AND type = 'R')
+  CREATE ROLE [$(SPOKE_BROKER_ROLE)]
+
+GRANT SELECT, INSERT ON SCHEMA::$(EHA_SCHEMA) TO $(SPOKE_BROKER_ROLE);
+DENY UPDATE, DELETE ON SCHEMA::$(EHA_SCHEMA) TO $(SPOKE_BROKER_ROLE);
+
+ALTER ROLE [$(SPOKE_BROKER_ROLE)]
+ADD MEMBER $(SPOKE_BROKER);
+
 IF NOT EXISTS ( SELECT * 
                 FROM sys.database_principals 
                 WHERE name = ORIGINAL_LOGIN() ) 
   BEGIN
-    DECLARE @CreateUserDDL NVARCHAR(128);
+    DECLARE @CreateUserDDL NVARCHAR(512);
     SET @CreateUserDDL = 'CREATE USER [' + ORIGINAL_LOGIN() + '] FROM LOGIN [' + ORIGINAL_LOGIN() + '];'
+                       + 'ALTER ROLE $(SPOKE_ADMIN_ROLE) ADD MEMBER [' + ORIGINAL_LOGIN() + '];'
+                       + 'ALTER ROLE $(SPOKE_BROKER_ROLE) ADD MEMBER [' + ORIGINAL_LOGIN() + '];'
     EXEC sp_executesql @CreateUserDDL;
   END 
-GO 
-IF NOT EXISTS ( SELECT *
-                FROM sys.database_principals
-                WHERE name = '$(EHADMIN_ROLE)' )  
+GO
+-- linked server uses ODBC DSN using ODBCad32.exe 
+IF NOT EXISTS (SELECT * FROM sys.servers
+                WHERE NAME = N'$(HUB_LINKED_SERVER_NAME)' )
+  IF SERVERPROPERTY('Edition') = 'SQL Azure'
+    EXEC dbo.sp_addlinkedserver @server = N'$(HUB_LINKED_SERVER_NAME)'
+                              , @srvproduct = N'Any'
+                              , @provider=N'MSDASQL'
+                              , @datasrc=N'$(HUB_DATASOURCE)'; -- ODBC DSN to Hub
+  ELSE 
+    EXEC dbo.sp_addlinkedserver @server = N'$(HUB_LINKED_SERVER_NAME)'
+                              , @srvproduct = N''
+                              , @provider=N'SQLNCLI'
+                              , @datasrc=N'$(HUB_SERVER_NAME)'; -- @@SERVERNAME of Hub
+  
+GO
+IF NOT EXISTS (SELECT * 
+               FROM sys.linked_logins l
+               JOIN sys.servers s
+               ON l.server_id = s.server_id
+               WHERE s.name = N'$(HUB_LINKED_SERVER_NAME)' 
+               AND l.remote_name = N'$(SPOKE_ADMIN)')
+  EXEC dbo.sp_addlinkedsrvlogin @rmtsrvname = N'$(HUB_LINKED_SERVER_NAME)'
+                              , @useself = N'False'
+                              , @locallogin = N'$(SPOKE_ADMIN)'
+                              , @rmtuser = N'$(SPOKE_ADMIN)'
+                              , @rmtpassword='$(SPOKE_ADMIN_PASSWORD)';
+GO
+IF NOT EXISTS (SELECT * 
+               FROM sys.linked_logins l
+               JOIN sys.servers s
+               ON l.server_id = s.server_id
+               WHERE s.name = N'$(HUB_LINKED_SERVER_NAME)' 
+               AND l.remote_name = N'$(SPOKE_BROKER)')
+  EXEC dbo.sp_addlinkedsrvlogin @rmtsrvname = N'$(HUB_LINKED_SERVER_NAME)'
+                              , @useself = N'False'
+                              , @locallogin = N'$(SPOKE_BROKER)'
+                              , @rmtuser = N'$(SPOKE_BROKER)'
+                              , @rmtpassword='$(SPOKE_BROKER_PASSWORD)';
+GO
+-- in-line crypto-functions will always obfuscate in event output
+USE master;
+-- only TDE capable - e.g. Developer, Enterprise, and Data Center SKUs
+IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0 
   BEGIN
-    DECLARE @CreateRoleDDL NVARCHAR(128);
-    SET @CreateRoleDDL = 'CREATE ROLE $(EHADMIN_ROLE) AUTHORIZATION [' + ORIGINAL_LOGIN() + '];' 
-    EXEC sp_executesql @CreateRoleDDL;
+    -- Certificate in master for TDE encrypted by master DMK (which is encrypted by the SMK (DPAPI)) 
+    IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE symmetric_key_id = 101)
+      CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$(master_DMK_ENCRYPTION_PHRASE)'
+    ELSE 
+      OPEN MASTER KEY DECRYPTION BY PASSWORD = '$(master_DMK_ENCRYPTION_PHRASE)';
+    IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(TDE_CERTIFICATE)')
+      CREATE CERTIFICATE $(TDE_CERTIFICATE) WITH SUBJECT = '$(SPOKE_DATABASE) TDE DEK';
   END
 GO
-IF IS_MEMBER('$(EHADMIN_ROLE)') <> 1
-  BEGIN
-    DECLARE @AddToRoleDDL NVARCHAR(128);
-    SET @AddToRoleDDL = 'ALTER ROLE $(EHADMIN_ROLE) ADD MEMBER [' + ORIGINAL_LOGIN() + ']';
-    --2008/5/0 --SET @AddToRoleDDL = 'EXEC sp_addrolemember ''$(EHADMIN_ROLE)'',[' + ORIGINAL_LOGIN() + ']';
-    EXEC sp_executesql @AddToRoleDDL;
-  END  
-GO
--- see security comments in sp_control_dbmasterkey_password documention 
--- it is when you must pass the secret to a procedure/function that they can sneak through
--- in-line crypto-functions will always obfuscate in the SQL Trace
+USE $(SPOKE_DATABASE);
 IF NOT EXISTS (SELECT * 
                FROM sys.symmetric_keys 
                WHERE symmetric_key_id = 101)
@@ -352,95 +770,70 @@ WITH ENCRYPTION BY PASSWORD = '$(EHDB_DMK_ENCRYPTION_PHRASE)';
 GO
 OPEN MASTER KEY 
 DECRYPTION BY PASSWORD = '$(EHDB_DMK_ENCRYPTION_PHRASE)';
-GO
-IF NOT EXISTS (SELECT * FROM sys.certificates 
-               WHERE name = '$(FILE_CERTIFICATE)')
+IF CERT_ID ('$(FILE_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(FILE_CERTIFICATE) 
   WITH SUBJECT = 'File System literal Column Encryption';
-GO
-IF NOT EXISTS (SELECT * 
-               FROM sys.symmetric_keys 
-               WHERE name = '$(FILE_SYMMETRIC_KEY)')
+IF KEY_GUID ('$(FILE_SYMMETRIC_KEY)') IS NULL
 	CREATE SYMMETRIC KEY $(FILE_SYMMETRIC_KEY) 
 	WITH ALGORITHM = $(FILE_KEY_ENCRYPTION_ALGORITHM) 
 	ENCRYPTION BY CERTIFICATE $(FILE_CERTIFICATE);
-GO
-IF NOT EXISTS (SELECT * FROM sys.certificates 
-               WHERE name = '$(NAME_CERTIFICATE)')
+IF CERT_ID ('$(NAME_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(NAME_CERTIFICATE) 
   WITH SUBJECT = 'Name Column Encryption';
-GO
-IF NOT EXISTS (SELECT * 
-               FROM sys.symmetric_keys 
-               WHERE name = '$(NAME_SYMMETRIC_KEY)')
+IF KEY_GUID ('$(NAME_SYMMETRIC_KEY)') IS NULL
 	CREATE SYMMETRIC KEY $(NAME_SYMMETRIC_KEY) 
 	WITH ALGORITHM = $(NAME_KEY_ENCRYPTION_ALGORITHM) 
 	ENCRYPTION BY CERTIFICATE $(NAME_CERTIFICATE);
-GO
-IF NOT EXISTS (SELECT * FROM sys.certificates 
-               WHERE name = '$(VALUE_CERTIFICATE)')
+IF CERT_ID ('$(VALUE_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(VALUE_CERTIFICATE) 
   WITH SUBJECT = 'Value Column Encryption';
-GO
-IF NOT EXISTS (SELECT * 
-               FROM sys.symmetric_keys 
-               WHERE name = '$(VALUE_SYMMETRIC_KEY)')
+IF KEY_GUID ('$(VALUE_SYMMETRIC_KEY)') IS NULL
 	CREATE SYMMETRIC KEY $(VALUE_SYMMETRIC_KEY) 
 	WITH ALGORITHM = $(VALUE_KEY_ENCRYPTION_ALGORITHM) 
 	ENCRYPTION BY CERTIFICATE $(VALUE_CERTIFICATE);
-GO
 -- signed cert is not a dependant of the DMK - only the one(s) responsible for change
 -- should to be allowed to open this certificate or view its secrets 
-IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(OBJECT_CERTIFICATE)')
+IF CERT_ID ('$(OBJECT_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(OBJECT_CERTIFICATE)
 	ENCRYPTION BY PASSWORD = N'$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)'
   WITH SUBJECT = N'Encryption Hieararchy Administrator db object Signing';
-GO
+-- sign the broker activation procs already created
+ADD SIGNATURE TO $(EHA_SCHEMA).InitiatorActivation 
+BY CERTIFICATE $(OBJECT_CERTIFICATE)
+WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
+ADD SIGNATURE TO $(EHA_SCHEMA).TargetActivation 
+BY CERTIFICATE $(OBJECT_CERTIFICATE)
+WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 -- with no password on the cert and the DMK not encrypted by the SMK, the DMK must be open to use
 -- only the data owner(s) should be allowed to open this certificate , i.e. have the DMK PASSPHRASE
-IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(AUTHENTICITY_CERTIFICATE)')
+IF CERT_ID ('$(AUTHENTICITY_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(AUTHENTICITY_CERTIFICATE) 
   WITH SUBJECT = 'Encryption Hieararchy Administrator Booking Gauntlet T-shirt';
-GO
 -- with no password on the cert and the DMK not encrypted by the SMK, the DMK must be open to use
 -- only the data owner(s) should be allowed to open this certificate , i.e. have the DMK PASSPHRASE
-IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(EVENT_CERTIFICATE)')
+IF CERT_ID ('$(EVENT_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(EVENT_CERTIFICATE) 
   WITH SUBJECT = 'Signature of EventData applied at activation';
-GO
 -- error cert is independant from DMK and portable 
 -- create same key on any SQL Server 2005/2008/2012 by providing name, source and identity
 -- not as secure becasue if anyone gets name, source and identity they can see the cipher text in clear text
 -- not quite as bad as a shared password but close, very important to rotate encryption password often
-IF NOT EXISTS (SELECT * 
-               FROM sys.symmetric_keys 
-               WHERE name = '$(ERROR_SYMMETRIC_KEY)')
+IF KEY_GUID ('$(ERROR_SYMMETRIC_KEY)') IS NULL
 	CREATE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY) 
     WITH ALGORITHM = $(ERROR_KEY_ENCRYPTION_ALGORITHM)
      , KEY_SOURCE = '$(ERROR_KEY_SOURCE)'
      , IDENTITY_VALUE =  '$(ERROR_KEY_IDENTITY)'
 	ENCRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-GO
 -- audit certificate is independent FROM DMK 
-IF NOT EXISTS (SELECT * FROM sys.certificates WHERE name = '$(AUDIT_CERTIFICATE)')
+IF CERT_ID('$(AUDIT_CERTIFICATE)') IS NULL
   CREATE CERTIFICATE $(AUDIT_CERTIFICATE) 
 	ENCRYPTION BY PASSWORD = '$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)'
   WITH SUBJECT = 'Encryption Hierarchy Administrator Audit Trail';
-GO
 -- audit key is sticky to the database 
-IF NOT EXISTS (SELECT * 
-               FROM sys.symmetric_keys 
-               WHERE name = '$(AUDIT_SYMMETRIC_KEY)')
+IF KEY_GUID ('$(AUDIT_SYMMETRIC_KEY)') IS NULL
 	CREATE SYMMETRIC KEY $(AUDIT_SYMMETRIC_KEY) 
 	WITH ALGORITHM = $(AUDIT_KEY_ENCRYPTION_ALGORITHM) 
 	ENCRYPTION BY CERTIFICATE $(AUDIT_CERTIFICATE);
-GO
-IF SCHEMA_ID('$(EHA_SCHEMA)') IS NULL
-  BEGIN
-    EXEC sp_executesql N'CREATE SCHEMA [$(EHA_SCHEMA)] AUTHORIZATION [$(EHADMIN_ROLE)]';
-    -- with Common Criteria enabled this overrides any column level GRANT too 
-    DENY DELETE, UPDATE ON SCHEMA::$(EHA_SCHEMA) TO PUBLIC;
-  END
 GO
 IF OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)') IS NULL
   BEGIN
@@ -455,7 +848,7 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)') IS NULL
 		    , ObjectName NVARCHAR (128) NULL
 		    , Parameters VARBINARY (8000) NOT NULL
         , KeyGuid NCHAR(36) NOT NULL
-        , Status VARCHAR (30) NOT NULL
+        , Status NVARCHAR (36) NOT NULL
           CONSTRAINT ck_$(BOOKINGS_TABLE)__Status 
           CHECK (Status IN ( 'audit'
                            , 'authority'
@@ -497,7 +890,7 @@ IF NOT EXISTS (SELECT * FROM sys.indexes where name = 'ixn_$(BOOKINGS_TABLE)__Ob
   CREATE NONCLUSTERED INDEX ixn_$(BOOKINGS_TABLE)__ObjectName__ServerName
   ON $(EHA_SCHEMA).$(BOOKINGS_TABLE) ( ObjectName, ServerName);
 GO
--- every backup and restore logs to BACKUP_ACTIVITY_TABLE upon completion
+-- record backup and restore attempts to BACKUP_ACTIVITY_TABLE upon completion/failure
 IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
   BEGIN
 	   CREATE TABLE $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
@@ -509,24 +902,24 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
         , Node HIERARCHYID NULL 
         , Level AS Node.GetLevel() PERSISTED 
 		    , NodeName NVARCHAR (128) NOT NULL
-		    , BackupName VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',896,1)=964-- NVARCHAR(448)
+		    , BackupName VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',896,1)=964 NVARCHAR(448)
 		    , BackupNameBucket INT NOT NULL 
         , UseHash BIT NOT NULL          
-		    , BackupPath VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',2048,1)=2116-- NVARCHAR(1024)
+		    , BackupPath VARBINARY(8000) NOT NULL -- CalculateCipherLen('ValueKey',2048,1)=2116 NVARCHAR(1024)
 		    , BackupPhraseVersion SMALLINT NOT NULL
 		    , KeyPhraseVersion SMALLINT NULL
         , Colophon INT NOT NULL  -- checksum of the hash of key guids and cert thumbprints- not presumed unique
-        , Edition SMALLINT NOT NULL  -- the number of backups made for the current Colophon       
+        , Edition SMALLINT NOT NULL  -- sequence of backups made for the current Colophon       
 		      CONSTRAINT dft_$(BACKUP_ACTIVITY_TABLE)__Version 
 		      DEFAULT (1)
-            , MAC VARBINARY (128) NOT NULL
-		    , Action VARCHAR (30) NOT NULL
-		    , Status VARCHAR (30) NOT NULL
+        , MAC VARBINARY (128) NOT NULL
+		    , Action NVARCHAR (128) NOT NULL
+		    , Status NVARCHAR (36) NOT NULL
           CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__Status 
           CHECK (Status IN ( 'Complete'
-							, 'Error'
-							, 'Instead'
-							, 'Offsite' ) ) 
+                           , 'Error'
+                           , 'Instead'
+                           , 'Offsite' ) ) 
         , CipherType CHAR (2) NOT NULL
           CONSTRAINT ck_$(BACKUP_ACTIVITY_TABLE)__CipherType 
           CHECK (CipherType IN ( 'A1'   -- AES 128 
@@ -560,7 +953,7 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)(NodeName, ServerName) INCLUDE (DbName, Action, Status); 
     CREATE NONCLUSTERED INDEX ixn_$(BACKUP_ACTIVITY_TABLE)__MAC__ServerName
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)(MAC, ServerName); 
-    CREATE NONCLUSTERED INDEX ixn_$(BACKUP_ACTIVITY_TABLE)__Node__ServerName      -- this gives a warning but no real risk of even 5 byte HIERARCHYIDs here
+    CREATE NONCLUSTERED INDEX ixn_$(BACKUP_ACTIVITY_TABLE)__Node__ServerName      -- this gives a warning but low risk of even 5 byte HIERARCHYIDs here
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)(Node, ServerName);                  -- 38 bits for 6 level 100,000 nodes acc'd BOL (~5 bytes), only 4 level here
     CREATE NONCLUSTERED INDEX ixn_$(BACKUP_ACTIVITY_TABLE)__Level__Node__ServerName -- breadth-first index - same warning as depth first index
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)(Level, Node, ServerName);             
@@ -568,67 +961,6 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)') IS NULL
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) (Colophon, Edition, ServerName); 
     CREATE NONCLUSTERED INDEX ixn_$(BACKUP_ACTIVITY_TABLE)__BackupNameBucket__ServerName
     ON $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) (BackupNameBucket, ServerName); 
-  END
-GO
--- will usually have only 1 row that holds an image of the TrueCrypt container 
--- can also be used to store the blank container and backups from other servers (if they go to the same EHHubDb)
-IF OBJECT_ID('$(EHA_SCHEMA).$(CONTAINERS_TABLE)', 'U') IS NULL
-  BEGIN
-    CREATE TABLE $(EHA_SCHEMA).$(CONTAINERS_TABLE)
-      ( Id UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL
-      , ServerName NVARCHAR(128) NOT NULL
-		    CONSTRAINT dft_$(CONTAINERS_TABLE)__ServerName
-		    DEFAULT (@@SERVERNAME)
-      , Tag NVARCHAR(128) NOT NULL                             
-        CONSTRAINT dft_$(CONTAINERS_TABLE)__Name
-        DEFAULT ( 'DEFAULT' )
-      , FileImage VARBINARY(MAX) NOT NULL 
-      , Signature VARBINARY(8000) NOT NULL
-      , CONSTRAINT pkc_$(CONTAINERS_TABLE)_Id__ServerName
-        PRIMARY KEY (Id, ServerName) 
-      , CONSTRAINT ukn_$(CONTAINERS_TABLE)_Tag__ServerName
-        UNIQUE ( Tag, ServerName )                             
-      , CONSTRAINT fk_$(CONTAINERS_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
-		    FOREIGN KEY ( Id, ServerName ) REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)(Id, ServerName) );
-    ADD SIGNATURE TO $(EHA_SCHEMA).$(CONTAINERS_TABLE) 
-    BY CERTIFICATE $(OBJECT_CERTIFICATE)
-    WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
-  END    
-GO
--- every filesystem backup to database and restore to filesystem of the truecrypt container gets a row upon completion  
-IF OBJECT_ID('$(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)', 'U') IS NULL
-  BEGIN
-    CREATE TABLE $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)
-      ( Id UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL 
-      , ServerName NVARCHAR(128) NOT NULL
-		    CONSTRAINT dft_$(CONTAINER_ACTIVITY_TABLE)__ServerName
-		    DEFAULT (@@SERVERNAME)
-      , FileName VARBINARY(8000)  
-      , FilePath VARBINARY(8000) 
-      , SizeInBytes BIGINT NOT NULL -- enough for uninvited to identify the local file? 
-      , MAC VARBINARY (128) NOT NULL
-		  , Action VARCHAR (30) NOT NULL
-        CONSTRAINT ck_$(CONTAINER_ACTIVITY_TABLE)__Action 
-        CHECK (Action IN ( 'BackupContainer'  -- Archive scope is complete schema 
-                         , 'RestoreContainer' ) )
-		  , Status VARCHAR (30) NOT NULL
-        CONSTRAINT ck_$(CONTAINER_ACTIVITY_TABLE)__Status 
-        CHECK (Status IN ( 'Complete'
-                         , 'Error' ) )
-      , ErrorData VARBINARY(8000) SPARSE NULL
-		  , CreateUTCDT DATETIME NOT NULL
-		    CONSTRAINT dft_$(CONTAINER_ACTIVITY_TABLE)__CreateUTCDT
-		    DEFAULT (SYSUTCDATETIME())
-		  , CreateUser NVARCHAR(128) NOT NULL
-		    CONSTRAINT dft_$(CONTAINER_ACTIVITY_TABLE)__CreateUser
-		    DEFAULT (ORIGINAL_LOGIN())  
-      , CONSTRAINT pkc_$(CONTAINER_ACTIVITY_TABLE)_Id__ServerName
-        PRIMARY KEY (Id, ServerName) 
-      , CONSTRAINT fk_$(CONTAINER_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
-		    FOREIGN KEY ( Id, ServerName) REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)( Id, ServerName ) );
-    ADD SIGNATURE TO $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
-    BY CERTIFICATE $(OBJECT_CERTIFICATE)
-    WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
   END
 GO
 --every secret goes in NAMEVALUES_TABLE
@@ -665,12 +997,6 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NAMEVALUES_TABLE)') IS NULL
     WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
   END
 GO 
--- used to pass encrypted name/value to avoid SQLTrace detection
-IF TYPE_ID('NAMEVALUETYPE') IS NULL
-  CREATE TYPE NAMEVALUETYPE AS TABLE
-	  ( Name VARBINARY(8000) NOT NULL
-	  , Value VARBINARY(8000) NOT NULL ); 	 
-GO
 -- every procedure that writes to or reads from NAMEVALUES_TABLE gets a row upon completion
 IF OBJECT_ID('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)') IS NULL
   BEGIN
@@ -678,10 +1004,10 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)') IS NULL
 		  ( Id UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL 
       , ServerName NVARCHAR(128) NOT NULL
 		    CONSTRAINT dft_$(NAMEVALUE_ACTIVITY_TABLE)__ServerName
-		    DEFAULT (@@SERVERNAME)
+		    DEFAULT ( @@SERVERNAME )
       , MAC VARBINARY(128) NOT NULL
 		  , Action VARCHAR (128) NOT NULL
-		  , Status VARCHAR (30) NOT NULL
+		  , Status NVARCHAR (36) NOT NULL
             CONSTRAINT ck_$(NAMEVALUE_ACTIVITY_TABLE)__Status 
             CHECK (Status IN ( 'Complete'
                              , 'Error'
@@ -691,12 +1017,12 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)') IS NULL
 		  , ErrorData VARBINARY(8000) SPARSE NULL 
 		  , CreateUTCDT DATETIME NOT NULL
 		    CONSTRAINT dft_$(NAMEVALUE_ACTIVITY_TABLE)__CreateUTCDT
-		    DEFAULT (SYSUTCDATETIME())
+		    DEFAULT ( SYSUTCDATETIME() )
 		  , CreateUser NVARCHAR(128)
 		    CONSTRAINT dft_$(NAMEVALUE_ACTIVITY_TABLE)__CreateUser
-		    DEFAULT (ORIGINAL_LOGIN())  
+		    DEFAULT ( ORIGINAL_LOGIN() )  
 		  , CONSTRAINT pk_$(NAMEVALUE_ACTIVITY_TABLE)__Id__ServerName
-		    PRIMARY KEY (Id, ServerName)
+		    PRIMARY KEY ( Id, ServerName )
 		  , CONSTRAINT fk_$(NAMEVALUE_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
 		    FOREIGN KEY ( Id, ServerName ) REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)( Id, ServerName ) );
     ADD SIGNATURE TO $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) 
@@ -704,59 +1030,40 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)') IS NULL
     WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
   END
 GO
--- the send offsite is automated by SQLAgent (if available) and Change Data Capture (preferred) or Change Tracking (if CDC not available) 
+-- the send offsite is automated by Service Broker and Change Data Capture (preferred) or Change Tracking (if CDC not available) 
 -- the recall and restore to FileTable always happen together but each gets its own log record and to different logging tables 
-IF OBJECT_ID('$(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)') IS NULL
+IF OBJECT_ID('$(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)') IS NULL
   BEGIN
-    CREATE TABLE $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
+    CREATE TABLE $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
       ( Id UNIQUEIDENTIFIER NOT NULL
-      , CaptureInstance NVARCHAR(128) NOT NULL
-        CONSTRAINT ck_$(OFFSITE_ACTIVITY_TABLE)__CaptureInstance 
-        CHECK (CaptureInstance IN ( '$(EHA_SCHEMA)_$(BOOKINGS_TABLE)'
-                                  , '$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(CONTAINERS_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE)' 
-                                  , '$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)' 
-                                  , 'unknown') )
       , ServerName NVARCHAR(128) NOT NULL 
-	      CONSTRAINT dft_$(OFFSITE_ACTIVITY_TABLE)__ServerName
+	      CONSTRAINT dft_$(SPOKE_ACTIVITY_TABLE)__ServerName
 	      DEFAULT (@@SERVERNAME)
-      , MinLsn BINARY(10) NOT NULL
-      , MaxLsn BINARY(10) NOT NULL
-      , [RowCount] INT NULL
       , MAC VARBINARY(128) NOT NULL
-      , Action VARCHAR(30)
-        CONSTRAINT ck_$(OFFSITE_ACTIVITY_TABLE)__Action 
-        CHECK ( Action IN ( 'SendOffsiteCDC'
-                          , 'SendOffSiteTC' 
-                          , 'RecallContainer' ) )
-      , Status VARCHAR(30)
-        CONSTRAINT ck_$(OFFSITE_ACTIVITY_TABLE)__Status 
+      , Action NVARCHAR (128)
+      , Status NVARCHAR (36)
+        CONSTRAINT ck_$(SPOKE_ACTIVITY_TABLE)__Status 
         CHECK ( Status IN ( 'Complete'
                           , 'Error' ) )
       , ErrorData VARBINARY(8000) SPARSE NULL
       , CreateUTCDT DATETIME
-        CONSTRAINT dft_$(OFFSITE_ACTIVITY_TABLE)__CreateUTCDT
+        CONSTRAINT dft_$(SPOKE_ACTIVITY_TABLE)__CreateUTCDT
 		    DEFAULT (SYSUTCDATETIME())
 	    , CreateUser NVARCHAR(128) NOT NULL
-		    CONSTRAINT dft_$(OFFSITE_ACTIVITY_TABLE)__CreateUser
+		    CONSTRAINT dft_$(SPOKE_ACTIVITY_TABLE)__CreateUser
 		    DEFAULT ( ORIGINAL_LOGIN() ) 
-      , CONSTRAINT pk_$(OFFSITE_ACTIVITY_TABLE)__Id__CaptureInstance_ServerName
-        PRIMARY KEY (Id, CaptureInstance, ServerName ) 
-      , CONSTRAINT fk_$(OFFSITE_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
+      , CONSTRAINT pk_$(SPOKE_ACTIVITY_TABLE)__Id__ServerName
+        PRIMARY KEY (Id, ServerName ) 
+      , CONSTRAINT fk_$(SPOKE_ACTIVITY_TABLE)__Id__ServerName__TO__$(BOOKINGS_TABLE)__Id__ServerName
         FOREIGN KEY ( Id, ServerName ) 
         REFERENCES $(EHA_SCHEMA).$(BOOKINGS_TABLE)( Id, ServerName ) );   
-    ADD SIGNATURE TO $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    ADD SIGNATURE TO $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
     BY CERTIFICATE $(OBJECT_CERTIFICATE)
     WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 
   END 
 GO
--- event notifications are persisted to this table by the activation proc
+-- event notifications are persisted to this table by the activation proc 
 IF OBJECT_ID('$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)') IS NULL
   BEGIN
     CREATE TABLE $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
@@ -769,8 +1076,8 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)') IS NULL
       , Message VARBINARY(MAX) NOT NULL
       , Signature VARBINARY(8000) NOT NULL
       , MAC VARBINARY(128) NOT NULL
-      , Action VARCHAR(30)
-      , Status VARCHAR(30)
+      , Action NVARCHAR (128)
+      , Status NVARCHAR (36)
         CONSTRAINT ck_$(NOTIFICATION_ACTIVITY_TABLE)__Status 
         CHECK ( Status IN ( 'Complete'
                           , 'Error' ) )
@@ -805,7 +1112,7 @@ IF OBJECT_ID('$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)') IS NULL
       , Duration_ms INT NULL 
       , RowsReturned INT NULL 
       , MAC VARBINARY(128) NOT NULL
-	    , Status VARCHAR (30) NOT NULL
+	    , Status NVARCHAR (36) NOT NULL
         CONSTRAINT ck_$(REPORT_ACTIVITY_TABLE)__Status 
         CHECK (Status IN ( 'Complete'
                           , 'Error' ) )
@@ -831,49 +1138,44 @@ GO
 ------------------------------ 
 -- SQL 2012 FileTable (RTM) 
 ------------------------------
--- one filegroup for FILESTREAM and/or FILETABLE 
--- 
 -- steps to a filetable
--- 0. FILESTREAM is enabled at the instance level (SQL Confg. Mgr.by Windows Admin)
--- 1. Add FILESTREAM File Group
+-- 1. enable FILESTREAM on instance level 
+--    (SQL Confg. Mgr. or SQL install by Windows Admin)
+-- 2. add FILESTREAM file group
   IF NOT EXISTS ( SELECT * FROM sys.filegroups
                   WHERE name = '$(FILESTREAM_FILEGROUP)' )
-    ALTER DATABASE $(EHDB)
+    ALTER DATABASE $(SPOKE_DATABASE)
     ADD FILEGROUP $(FILESTREAM_FILEGROUP) 
     CONTAINS FILESTREAM;
   GO
--- 2. Add a folder (SQL calls it a file but is a visible folder in Windows Explorer.) 
---    for restores along side the export container...  
+-- 3. Add a file to the file group 
   IF NOT EXISTS ( SELECT * FROM sys.database_files
                   WHERE name = '$(FILETABLE_DIRECTORY)' )
-      ALTER DATABASE $(EHDB)
+      ALTER DATABASE $(SPOKE_DATABASE)
       ADD FILE 
       (
           NAME = '$(FILETABLE_DIRECTORY)',
-          FILENAME = '$(KEY_CONTAINER_PATH)$(FILETABLE_DIRECTORY)'
+          FILENAME = '$(EXPORT_PATH)$(FILETABLE_DIRECTORY)'
       )
       TO FILEGROUP $(FILESTREAM_FILEGROUP);
 GO
--- 3. Specify the level of non-transactional file system access 
--- 4. Specify a Directory for FileTables at the Database Level
+-- 4. Set directory's file system access 
   IF NOT EXISTS ( SELECT * 
                   FROM sys.database_filestream_options
                   WHERE database_id = DB_ID()
                   AND directory_name = '$(FILETABLE_DIRECTORY)' 
                   AND non_transacted_access = 2) 
-    ALTER DATABASE $(EHDB)
+    ALTER DATABASE $(SPOKE_DATABASE)
     SET FILESTREAM ( NON_TRANSACTED_ACCESS = FULL               
                    , DIRECTORY_NAME = '$(FILETABLE_DIRECTORY)' );
 GO
-  -- 5. Add a FileTable for recall/restores
-  --    need enough free space here to hold container recalled from hub 
+  -- 5. Add a FileTable 
   IF NOT EXISTS ( SELECT * 
                   FROM sys.filetables
-                  WHERE directory_name = '$(FILETABLE_DIRECTORY)'
-                  AND OBJECT_ID('$(EHA_SCHEMA).$(RESTORE_FILETABLE)') IS NULL) 
+                  WHERE directory_name = '$(RESTORES_FILETABLE)' ) 
   BEGIN
-    CREATE TABLE $(EHA_SCHEMA).$(RESTORE_FILETABLE) AS FileTable;
-    ADD SIGNATURE TO $(EHA_SCHEMA).$(RESTORE_FILETABLE) 
+    CREATE TABLE $(EHA_SCHEMA).$(RESTORES_FILETABLE) AS FileTable;
+    ADD SIGNATURE TO $(EHA_SCHEMA).$(RESTORES_FILETABLE) 
     BY CERTIFICATE $(OBJECT_CERTIFICATE)
     WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
   END
@@ -882,32 +1184,30 @@ GO
 -- Offsite 
 -- change data capture if available else change tracking
 -----------------------------------------------------------------
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_BOOKINGS_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(BOOKINGS_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(BOOKINGS_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(BOOKINGS_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_BACKUP_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(BACKUP_ACTIVITY_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(BACKUP_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(BACKUP_ACTIVITY_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_CONTAINERS_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(CONTAINERS_TABLE)]
+-- table only exists at hub
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(HUB_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(HUB_ACTIVITY_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_CONTAINER_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(CONTAINER_ACTIVITY_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(NAMEVALUES_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(NAMEVALUES_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_NAMEVALUES_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(NAMEVALUES_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(NAMEVALUE_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(NAMEVALUE_ACTIVITY_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(NAMEVALUE_ACTIVITY_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(NOTIFICATION_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(NOTIFICATION_ACTIVITY_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_NOTIFICATION_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(NOTIFICATION_ACTIVITY_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(SPOKE_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(SPOKE_ACTIVITY_TABLE)]
 GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_OFFSITE_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(OFFSITE_ACTIVITY_TABLE)]
-GO
-CREATE SYNONYM [$(EHA_SCHEMA)].[$(LINK_REPORT_ACTIVITY_SYNONYM)] 
-  FOR [$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(REPORT_ACTIVITY_TABLE)]
+CREATE SYNONYM [$(EHA_SCHEMA)].[$(REPORT_ACTIVITY_SYNONYM)] 
+  FOR [$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(REPORT_ACTIVITY_TABLE)]
 GO
 IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0 
   BEGIN
@@ -919,97 +1219,77 @@ IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCH
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(BOOKINGS_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
          WHERE name = '$(BACKUP_ACTIVITY_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(BACKUP_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
-                                 , @supports_net_changes = 1; 
-    IF ( SELECT is_tracked_by_cdc FROM sys.tables
-         WHERE name = '$(CONTAINERS_TABLE)'
-         AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
-      EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
-                                 , @source_name = '$(CONTAINERS_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
-                                 , @supports_net_changes = 1; 
-    IF ( SELECT is_tracked_by_cdc FROM sys.tables
-         WHERE name = '$(CONTAINER_ACTIVITY_TABLE)'
-         AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
-      EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
-                                 , @source_name = '$(CONTAINER_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
          WHERE name = '$(NAMEVALUES_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(NAMEVALUES_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
          WHERE name = '$(NAMEVALUE_ACTIVITY_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(NAMEVALUE_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
          WHERE name = '$(NOTIFICATION_ACTIVITY_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(NOTIFICATION_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
-         WHERE name = '$(OFFSITE_ACTIVITY_TABLE)'
+         WHERE name = '$(SPOKE_ACTIVITY_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
-                                 , @source_name = '$(OFFSITE_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @source_name = '$(SPOKE_ACTIVITY_TABLE)' 
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
     IF ( SELECT is_tracked_by_cdc FROM sys.tables
          WHERE name = '$(REPORT_ACTIVITY_TABLE)'
          AND schema_id = SCHEMA_ID('$(EHA_SCHEMA)') ) = 0 
       EXEC sys.sp_cdc_enable_table @source_schema = '$(EHA_SCHEMA)'
                                  , @source_name = '$(REPORT_ACTIVITY_TABLE)' 
-                                 , @role_name = '$(EHADMIN_ROLE)'
+                                 , @role_name = '$(SPOKE_ADMIN_ROLE)'
                                  , @supports_net_changes = 1; 
   END
 ELSE -- change tracking 
   BEGIN
-    ALTER DATABASE $(EHDB)
+    ALTER DATABASE $(SPOKE_DATABASE)
     SET CHANGE_TRACKING = ON
-    (AUTO_CLEANUP = OFF);
+    (AUTO_CLEANUP = OFF); --(CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON)
     ALTER TABLE $(EHA_SCHEMA).$(BOOKINGS_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
     ALTER TABLE $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
-    ALTER TABLE $(EHA_SCHEMA).$(CONTAINERS_TABLE)
-    ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
-    ALTER TABLE $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)
-    ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
     ALTER TABLE $(EHA_SCHEMA).$(NAMEVALUES_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
     ALTER TABLE $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
     ALTER TABLE $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
-    ALTER TABLE $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
+    ALTER TABLE $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
     ALTER TABLE $(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)
     ENABLE CHANGE_TRACKING
-    WITH (TRACK_COLUMNS_UPDATED = ON);
+    WITH (TRACK_COLUMNS_UPDATED = OFF);
   END 
 GO
 --salt name
@@ -1038,9 +1318,9 @@ EXEC sp_addmessage $(MESSAGE_OFFSET)32, 16, 'Active data relay detected.', 'us_e
 EXEC sp_addmessage $(MESSAGE_OFFSET)33, 16, 'Booking failure - reason: %s', 'us_english', 'TRUE', 'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)34, 16, 'Authentication failure - ProcId: %d, BookingId: = [%s]', 'us_english', 'FALSE', 'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)35, 16, 'Invalid "%s" reason: %s', 'us_english', 'FALSE', 'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)36, 16, 'Authorization failure DbName: $(EHDB) Schema:$(EHA_SCHEMA): User %s  Action:%s', 'us_english', 'TRUE' , 'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)36, 16, 'Authorization failure DbName: $(SPOKE_DATABASE) Schema:$(EHA_SCHEMA): User %s  Action:%s', 'us_english', 'TRUE' , 'replace'
 EXEC sp_addmessage $(MESSAGE_OFFSET)37, 16, 'ANSI_PADDING must be ON for SQL Server encryption.', 'us_english','FALSE' ,'replace'
-EXEC sp_addmessage $(MESSAGE_OFFSET)38, 16, 'Request for duplicate encryption hierarchy node Backup must use @ForceNew = 1 (%s %s)', 'us_english','FALSE' ,'replace'
+EXEC sp_addmessage $(MESSAGE_OFFSET)38, 16, 'A duplicate encryption hierarchy node Backup must specify @ForceNew = 1 (%s %s)', 'us_english','FALSE' ,'replace'
 GO
 -- DEK encrypted by cert in master db shares no dependency with the phrase encrypted DMK    
 IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0
@@ -1049,12 +1329,12 @@ IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCH
     SET @TDEDDL = 'IF NOT EXISTS ( SELECT *' + SPACE(1) 
                 +                 'FROM sys.dm_database_encryption_keys' + SPACE(1) 
                 +                 'WHERE database_id = DB_ID()' + SPACE(1)
-                +                 'AND DB_NAME() = ''$(EHDB)'' )' + SPACE(1) 
+                +                 'AND DB_NAME() = ''$(SPOKE_DATABASE)'' )' + SPACE(1) 
                 +   'BEGIN' + SPACE(1) 
                 +     'CREATE DATABASE ENCRYPTION KEY' + SPACE(1)
                 +     'WITH ALGORITHM = $(TDE_CERTIFICATE_ALGORITHM)' + SPACE(1)
                 +     'ENCRYPTION BY SERVER CERTIFICATE $(TDE_CERTIFICATE);' + SPACE(1)
-                +     'ALTER DATABASE $(EHDB)' + SPACE(1)
+                +     'ALTER DATABASE $(SPOKE_DATABASE)' + SPACE(1)
                 +     'SET ENCRYPTION ON;'
                 +   'END' + SPACE(1)
     EXEC sp_executesql @TDEDDL;
@@ -1077,7 +1357,7 @@ $(WITH_OPTIONS)
 AS
 BEGIN
   BEGIN TRY
-    IF (SELECT IIF ( COUNT(s.entity_id) = $(OBJECT_COUNT) - $(TABLE_COUNT), 1, 0 ) 
+    IF (SELECT IIF ( COUNT(s.entity_id) = $(OBJECT_COUNT) - $(DELTA), 1, 0 ) 
         FROM sys.certificates c
         CROSS APPLY sys.fn_check_object_signatures ( 'certificate'
 	    	                                          , c.thumbprint) s
@@ -1088,7 +1368,7 @@ BEGIN
         AND s.is_signature_valid = 1
         AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
         AND EXISTS ( SELECT * FROM sys.database_role_members 
-                      WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                      WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                       AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                       AND SYSTEM_USER = ORIGINAL_LOGIN() ) ) = 1
       BEGIN
@@ -1143,7 +1423,7 @@ $(WITH_OPTIONS)
 AS
 BEGIN
 DECLARE @Thumbprint VARBINARY(32)
-      , @Reason NVARCHAR(30)
+      , @Reason NVARCHAR (36)
       , @ErrorData VARBINARY(8000);
 DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
   BEGIN TRY
@@ -1159,9 +1439,7 @@ DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
         AND o.schema_id = SCHEMA_ID( '$(EHA_SCHEMA)' ) 
         AND (o.parent_object_id = 0 OR o.type = 'TR')       
         HAVING COUNT(*) = $(OBJECT_COUNT)
-        AND SUM ( ISNULL( s.is_signature_valid, 0 ) ) = $(OBJECT_COUNT) - $(TABLE_COUNT)  
-        AND SUM ( IIF( o.type = 'SN', 1, 0 ) ) = $(TABLE_COUNT)
-        AND SUM ( IIF( o.type = 'TR', 1, 0 ) ) = $(TABLE_COUNT) - 1 ) <> 1
+        AND SUM ( ISNULL( s.is_signature_valid, 0 ) ) = $(OBJECT_COUNT) - $(DELTA) ) <> 1
       RAISERROR($(MESSAGE_OFFSET)30,16,1);
     SET @Reason = 'messages';
     -- text of any of our sys.messages is changed from the same value computed at install 
@@ -1170,9 +1448,13 @@ DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
           FROM sys.messages
           WHERE message_id between $(MESSAGE_OFFSET)00 AND $(MESSAGE_OFFSET)50 ) 
          <>
-        ( SELECT Colophon
-          FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)  
-          WHERE Id = '00000000-0000-0000-0000-000000000000' ) 
+        ( SELECT a.Colophon
+          FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) AS a
+          JOIN $(EHA_SCHEMA).$(BOOKINGS_TABLE) AS b 
+          ON a.Id = b.Id
+          AND a.ServerName = b.ServerName
+          WHERE a.Id = b.KeyGuid -- install uses guid of the session key as Id
+          AND b.ServerName = @@SERVERNAME ) 
       RAISERROR($(MESSAGE_OFFSET)30,16,1);
     SET @Reason = 'probe';
     IF XACT_STATE() <> 0
@@ -1195,7 +1477,7 @@ DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
     -- Extended Events too are obfuscated automajically, but better safe than sorry
     -- white list valid config but avoid wildcards - BE SPECIFIC
     OR ( SELECT COUNT(*) FROM sys.traces 
-         WHERE is_default <> 1 ) > $(ALLOW_TRACE_COUNT)-- should also check for known vulnerable events    
+         WHERE is_default <> 1 ) > $(MAX_TRACE_COUNT)-- could also check for known vulnerable events    
     OR EXISTS (SELECT * FROM sys.dm_xe_sessions
                WHERE name NOT IN ( 'system_health'
                                  , 'sp_server_diagnostics session' 
@@ -1214,7 +1496,7 @@ DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
     -- sysadmin is always dbo so dbo will cover both 
     -- assert db principal, server principle and windows user all have same name
     IF NOT EXISTS ( SELECT * FROM sys.database_role_members 
-                    WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                    WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                     AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                     AND SYSTEM_USER = ORIGINAL_LOGIN() 
                     AND SESSION_USER = 'dbo' )	
@@ -1255,36 +1537,31 @@ DECLARE @output TABLE (Id NCHAR(36), CkSum NVARCHAR(128) );
     SET @Reason = 'whitelist'; 
     IF ( OBJECT_NAME(@ProcId) NOT IN ( 'AddNameValue'
                                      , 'BackupCertificate' 
-                                     , 'BackupContainer' 
                                      , 'BackupDatabaseMasterKey' 
                                      , 'BackupServiceMasterKey' 
                                      , 'CertificateBackupsByThumbprint' 
                                      , 'GetPortableSymmetricKey'
                                      , 'GetPrivateValue'
                                      , 'MakeSalt' 
-                                     , 'RecallContainer' 
                                      , 'ReportActivityHistory' 
                                      , 'ReportErrors' 
                                      , 'ReportServerSummary'
                                      , 'RestoreCertificate' 
-                                     , 'RestoreContainer' 
                                      , 'RestoreDatabaseMasterKey' 
                                      , 'RestoreServiceMasterKey' 
-                                     , 'SavePortableSymmetricKey'
-                                     , 'SavePrivateValue'
-                                     , 'SendOffsiteCDC' 
-                                     , 'SendOffsiteTC' 
+                                     , 'AddPortableSymmetricKey'
+                                     , 'AddPrivateValue'
+                                     , 'PushCapturedChanges' 
+                                     , 'PushTrackedChanges' 
                                      , 'SelectNameValue' 
                                      , 'ValidateNameValue' 
                                      , '$(EVENT_NOTIFICATION)Activation'
                                      , 'trg_$(BOOKINGS_TABLE)'
-                                     , 'trg_$(CONTAINERS_TABLE)'
-                                     , 'trg_$(CONTAINER_ACTIVITY_TABLE)'
                                      , 'trg_$(NAMEVALUES_TABLE)'
                                      , 'trg_$(NAMEVALUE_ACTIVITY_TABLE)'
                                      , 'trg_$(BACKUP_ACTIVITY_TABLE)'
                                      , 'trg_$(NOTIFICATION_ACTIVITY_TABLE)'
-                                     , 'trg_$(OFFSITE_ACTIVITY_TABLE)'
+                                     , 'trg_$(SPOKE_ACTIVITY_TABLE)'
                                      , 'trg_$(REPORT_ACTIVITY_TABLE)' ) )
     OR OBJECT_SCHEMA_NAME(@ProcId) <> '$(EHA_SCHEMA)'           
       RAISERROR($(MESSAGE_OFFSET)35,16,1,'@ProcId', @Reason);    
@@ -1383,201 +1660,21 @@ ADD SIGNATURE TO $(EHA_SCHEMA).Book
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID ('$(EHA_SCHEMA).$(EVENT_NOTIFICATION)Activation') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Activation
-GO
--------------------------------------------------------------------------------
---    bwunder at yahoo dot com
---    Desc: process notifications from eha queue
--------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Activation 
-$(WITH_OPTIONS)
-AS
-BEGIN
-DECLARE @ConversationHandle UNIQUEIDENTIFIER
-      , @ConversationGroupId UNIQUEIDENTIFIER
-      , @ConversationGroup NVARCHAR(50)
-      , @ErrorData VARBINARY(8000)
-      , @Id NCHAR(36)
-      , @MAC VARBINARY(128)
-      , @MessageBody VARBINARY(MAX)
-      , @MessageTypeName NVARCHAR(128)
-      , @Parameters VARBINARY(8000)
-      , @ReturnCode INT
-      , @ServiceName NVARCHAR(128)
-      , @tvp NAMEVALUETYPE
-      , @Version INT ; -- AddNameValue output parameter
-SET NOCOUNT ON;
-  BEGIN TRY
-    EXEC $(EHA_SCHEMA).OpenSession;
- 	  SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , N''
-                                  , 1
-                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
-    CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
-    EXEC $(EHA_SCHEMA).Book @@PROCID
-                          , @Parameters
-                          , @Id OUTPUT
-                          , @MAC OUTPUT; 
-    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
-                    WHERE Id = @Id
-                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
-                    AND ObjectName = OBJECT_NAME(@@PROCID) 
-                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
-                                          , CAST(CHECKSUM( Id
-                                                         , @@PROCID   
-                                                         , ObjectName
-                                                         , @Parameters
-                                                         , KeyGuid
-                                                         , Status ) AS NVARCHAR(128) )
-                                          , @MAC ) = 1 ) 
-      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-      WAITFOR ( GET CONVERSATION GROUP @ConversationGroupId 
-                FROM $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue )
-          , TIMEOUT 6000; -- a minute - the session keys are open for this
-      IF @ConversationGroupId IS NOT NULL
-        BEGIN
-          RECEIVE TOP(1)
-              @ConversationHandle = [conversation_handle]
-            , @ServiceName = [service_name]
-            , @MessageTypeName = [message_type_name]
-            , @MessageBody = [message_body]
-          FROM $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue
-          WHERE conversation_group_id = @ConversationGroupId;
-          IF @@ROWCOUNT = 1 
-            BEGIN  
-              -- only want to work with Events
-              IF @MessageTypeName = 'http://schemas.microsoft.com/SQL/Notifications/EventNotification'
-              AND @ServiceName = '$(EVENT_NOTIFICATION)Service'
-                BEGIN
-                  -- DISABLE DDL TRIGGER gets the special treatment (ENABLE is benign if already enabled)
-                  IF ( CAST( @MessageBody AS XML ).value('(/EVENT_INSTANCE/EventType)[1]','NVARCHAR(128)') = 'AUDIT_DATABASE_OBJECT_MANAGEMENT_EVENT')           
-                    ENABLE TRIGGER ALL ON DATABASE;
-                  INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
-                    ( Id
-                    , ConversationGroupId 
-                    , ConversationHandle
-                    , Message
-                    , Signature
-                    , MAC
-                    , Action
-                    , Status )
-                  VALUES ( @Id
-                         , @ConversationGroupId 
-                         , @ConversationHandle
-                         , @MessageBody
-                         , SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
-                                     , @MessageBody )
-                         , @MAC
-                         , OBJECT_NAME(@@PROCID)
-                         , 'Complete' );
-                END
-              ELSE
-                IF @ServiceName = '$(EVENT_NOTIFICATION)Service'  
-                  RAISERROR('Invalid message type "%s" found in the [$(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue]',16,1,@MessageTypeName);
-                ELSE
-                  RAISERROR('Invalid use of [$(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue] by service "%s"',16,1,@ServiceName);
-            END -- there is a dialog item to process
-        END -- conversation group exists
-      CLOSE ALL SYMMETRIC KEYS;
-  END TRY
-  BEGIN CATCH
-    IF @@TRANCOUNT > 0
-      ROLLBACK TRANSACTION
-    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
-    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-    INSERT  $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)
-      ( Id
-      , ConversationGroupId 
-      , ConversationHandle
-      , Message
-      , Signature
-      , MAC
-      , Action
-      , Status 
-      , ErrorData)
-    SELECT @Id
-         , ISNULL( @ConversationGroupId, 0x0 ) 
-         , ISNULL( @ConversationHandle, 0x0 )
-         , ISNULL( @MessageBody, 0x0 )
-         , ISNULL( SIGNBYCERT( KEY_ID( '$(EVENT_CERTIFICATE)' )
-                             , CAST( @MessageBody AS XML ).value ( '(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]','nvarchar(max)' ) )
-                  , 0x0 )     
-         , ISNULL( @MAC, 0x0 )
-         , OBJECT_NAME( @@PROCID )
-         , 'Complete'
-         , ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
-                       , ErrorInfo 
-                       , 1
-                       , @Id )
-    FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
-                              , ERROR_NUMBER()
-                              , ERROR_SEVERITY()
-                              , ERROR_STATE()
-                              , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
-                              , ERROR_LINE()
-                              , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
-    CLOSE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY);
-  END CATCH
-END
-GO
-ADD SIGNATURE TO $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Activation 
-BY CERTIFICATE $(OBJECT_CERTIFICATE)
-WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
-GO
-------------------------------------------------------
--- Fire up an Event Notification Changes Queue 
------------------------------------------------------- 
-IF NOT EXISTS ( SELECT * FROM sys.service_queues 
-                WHERE name = '$(EVENT_NOTIFICATION)Queue'
-                AND schema_id = SCHEMA_ID( '$(EHA_SCHEMA)' ) ) 
-  CREATE QUEUE $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue 
-  WITH RETENTION = ON
-     , ACTIVATION ( STATUS = ON
-                  , PROCEDURE_NAME = $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Activation
-                  , MAX_QUEUE_READERS = 1
-                  , EXECUTE AS SELF ) ;
-GO
--- role canniot own a service so this one is left for dbo
-IF NOT EXISTS ( SELECT * FROM sys.services 
-                WHERE name = '$(EVENT_NOTIFICATION)Service' )
-  CREATE SERVICE $(EVENT_NOTIFICATION)Service
-  ON QUEUE $(EHA_SCHEMA).$(EVENT_NOTIFICATION)Queue 
-    ( [http://schemas.microsoft.com/SQL/Notifications/PostEventNotification] );
-GO
-IF NOT EXISTS (SELECT * FROM sys.routes WHERE Address = 'LOCAL')
-  CREATE ROUTE $(EVENT_NOTIFICATION)Route
-  AUTHORIZATION $(EHADMIN_ROLE) 
-  WITH SERVICE_NAME = '$(EVENT_NOTIFICATION)Service'
-     , ADDRESS = 'LOCAL';
-GO
-IF NOT EXISTS (SELECT * FROM sys.event_notifications WHERE name = '$(EVENT_NOTIFICATION)Db')
-  CREATE EVENT NOTIFICATION $(EVENT_NOTIFICATION)Db 
-  ON DATABASE 
-  FOR DDL_DATABASE_LEVEL_EVENTS 
-  TO SERVICE '$(EVENT_NOTIFICATION)Service', 'current database' ;
-GO
-IF NOT EXISTS (SELECT * FROM sys.server_event_notifications WHERE name = '$(EVENT_NOTIFICATION)Srv')
-  CREATE EVENT NOTIFICATION $(EVENT_NOTIFICATION)Srv 
-  ON SERVER 
-  FOR AUDIT_DATABASE_OBJECT_MANAGEMENT_EVENT 
-  TO SERVICE '$(EVENT_NOTIFICATION)Service', 'current database' ;
-GO
+
 ----------
 -- Audit
 ----------
 USE master ;
 GO
--- Create the server audit at the location of the TrueCrypt container
 IF NOT EXISTS (SELECT * FROM sys.server_audits 
                 WHERE name = '$(EHA_SCHEMA)SchemaAudit' ) 
   CREATE SERVER AUDIT $(EHA_SCHEMA)SchemaAudit
-      TO FILE ( FILEPATH = '$(KEY_CONTAINER_PATH)' ) ;
+        TO $(AUDIT_TO)_LOG;
 GO
-ALTER SERVER AUDIT $(EHA_SCHEMA)SchemaAudit 
+ALTER SERVER AUDIT ehaSchemaAudit 
 WITH (STATE = ON) ;
 GO
-USE $(EHDB);
+USE $(SPOKE_DATABASE);
 GO
 IF NOT EXISTS (SELECT * FROM sys.database_audit_specifications 
                 WHERE name = '$(EHA_SCHEMA)SchemaAuditDbSpecs' ) 
@@ -1637,10 +1734,7 @@ DECLARE @ErrorData VARBINARY(8000)
            , d.ProcId   
            , OBJECT_NAME(d.ProcId)
            , d.Parameters
-           , 'Instead' + SPACE(1) 
-           + CASE WHEN i.Id IS NULL 
-                  THEN 'DELETE' 
-                  ELSE 'UPDATE' END
+           , 'Instead'
     FROM deleted d
     LEFT JOIN inserted i
     ON d.Id = i.Id;
@@ -1744,7 +1838,9 @@ DECLARE @ErrorData VARBINARY(8000)
          , ISNULL( i.Colophon, d.Colophon )
          , ISNULL( i.Edition, d.Edition )
          , @MAC
-         , 'Instead' + SPACE(10) + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Complete'
          , ISNULL(i.CipherType, d.CipherType) 
     FROM deleted d
@@ -1787,7 +1883,9 @@ DECLARE @ErrorData VARBINARY(8000)
          , d.Colophon 
          , d.Edition
          , ISNULL( @MAC, 0x0 )
-         , 'Instead' + SPACE(10) + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Error'
          , d.CipherType 
          , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
@@ -1811,190 +1909,6 @@ DECLARE @ErrorData VARBINARY(8000)
 END
 GO
 ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(BACKUP_ACTIVITY_TABLE) 
-BY CERTIFICATE $(OBJECT_CERTIFICATE)
-WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
-GO
-IF OBJECT_ID('$(EHA_SCHEMA).trg_$(CONTAINERS_TABLE)') IS NOT NULL
-  DROP TRIGGER $(EHA_SCHEMA).trg_$(CONTAINERS_TABLE)
-GO
--------------------------------------------------------------------------------
---    bwunder at yahoo dot com
---    Desc: reject but make note of all update and delete attempts 
---    ASSERT: DMK is open  
--------------------------------------------------------------------------------
-CREATE TRIGGER $(EHA_SCHEMA).trg_$(CONTAINERS_TABLE) 
-ON  $(EHA_SCHEMA).$(CONTAINERS_TABLE)
-$(WITH_OPTIONS)
-INSTEAD OF UPDATE, DELETE
-AS 
-BEGIN
-SET NOCOUNT ON;
-DECLARE @ErrorData VARBINARY(8000)
-      , @Id NCHAR(36)
-      , @MAC VARBINARY(128);
-  BEGIN TRY
-    EXEC $(EHA_SCHEMA).Book @@PROCID
-                          , 0x0 -- @Parameters
-                          , @Id OUTPUT
-                          , @MAC OUTPUT; 
-    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
-                    WHERE Id = @Id
-                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
-                    AND ObjectName = OBJECT_NAME(@@PROCID) 
-                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
-                                          , CAST( CHECKSUM( Id
-                                                          , @@PROCID   
-                                                          , ObjectName
-                                                          , 0x0 -- @Parameters
-                                                          , Status ) AS NVARCHAR(128) )
-                                          , @MAC ) = 1 ) 
-      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
-      ( Id
-      , FileName
-      , FilePath
-      , MAC
-      , Action
-      , Status )
-    SELECT @Id
-         , 0x0
-         , 0x0 
-         , @MAC
-         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END + SPACE(1) 
-           + '$(CONTAINERS_TABLE)' + SPACE(1) + CAST(d.Id AS NCHAR(36))
-         , 'Instead'  
-    FROM deleted d
-    JOIN inserted i
-    on d.Id = i.Id;
-  END TRY
-  BEGIN CATCH
-    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
-    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
-      ( Id
-      , FileName
-      , FilePath
-      , MAC
-      , Action
-      , Status 
-      , ErrorData)
-    SELECT @Id 
-         , 0x0
-         , 0x0
-         , ISNULL( @MAC, 0x0 )   
-         , OBJECT_NAME( @@PROCID )
-         , 'Error'    
-         , ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
-                       , ErrorInfo 
-                       , 1
-                       , @Id )
-    FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
-                                     , ERROR_NUMBER()
-                                     , ERROR_SEVERITY()
-                                     , ERROR_STATE()
-                                     , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
-                                     , ERROR_LINE()
-                                     , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
-    CLOSE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY);
-    IF @@NESTLEVEL > 1
-      THROW;
-  END CATCH
-END
-GO
-ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(CONTAINERS_TABLE) 
-BY CERTIFICATE $(OBJECT_CERTIFICATE)
-WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
-GO
-IF OBJECT_ID('$(EHA_SCHEMA).trg_$(CONTAINER_ACTIVITY_TABLE)') IS NOT NULL
-  DROP TRIGGER $(EHA_SCHEMA).trg_$(CONTAINER_ACTIVITY_TABLE)
-GO
--------------------------------------------------------------------------------
---    bwunder at yahoo dot com
---    Desc: reject but make note of all update and delete attempts 
---    ASSERT: DMK is open  
--------------------------------------------------------------------------------
-CREATE TRIGGER $(EHA_SCHEMA).trg_$(CONTAINER_ACTIVITY_TABLE) 
-ON  $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)
-$(WITH_OPTIONS)
-INSTEAD OF UPDATE, DELETE
-AS 
-BEGIN
-SET NOCOUNT ON;
-DECLARE @ErrorData VARBINARY(8000)
-      , @Id NCHAR(36)
-      , @MAC VARBINARY(128);
-  BEGIN TRY
-    EXEC $(EHA_SCHEMA).Book @@PROCID
-                          , 0x0 -- @Parameters
-                          , @Id OUTPUT
-                          , @MAC OUTPUT; 
-    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
-                    WHERE Id = @Id
-                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
-                    AND ObjectName = OBJECT_NAME(@@PROCID) 
-                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
-                                          , CAST( CHECKSUM( Id
-                                                          , @@PROCID   
-                                                          , ObjectName
-                                                          , 0x0 -- @Parameters
-                                                          , Status ) AS NVARCHAR(128) )
-                                          , @MAC ) = 1 ) 
-      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
-      ( Id
-      , FileName
-      , FilePath
-      , MAC
-      , Action
-      , Status )
-    SELECT @Id
-         , d.FileName
-         , d.FilePath
-         , @MAC
-         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END + SPACE(1) 
-           + '$(CONTAINER_ACTIVITY_TABLE)' + SPACE(1) + CAST(d.Id AS NCHAR(36))
-         , 'Instead'  
-    FROM deleted d
-    JOIN inserted i
-    on d.Id = i.Id;
-  END TRY
-  BEGIN CATCH
-    OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
-    DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
-      ( Id
-      , FileName
-      , FilePath
-      , MAC
-      , Action
-      , Status 
-      , ErrorData)
-    SELECT @Id 
-         , ISNULL( d.FileName, 0x0 )
-         , ISNULL( d.FilePath, 0x0 )
-         , ISNULL( @MAC, 0x0 )   
-         , OBJECT_NAME( @@PROCID )
-         , 'Error'    
-         , ENCRYPTBYKEY( KEY_GUID( '$(ERROR_SYMMETRIC_KEY)' )
-                       , ErrorInfo 
-                       , 1
-                       , @Id )
-    FROM deleted d
-    OUTER APPLY (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
-                                     , ERROR_NUMBER()
-                                     , ERROR_SEVERITY()
-                                     , ERROR_STATE()
-                                     , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
-                                     , ERROR_LINE()
-                                     , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
-    CLOSE SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY);
-    IF @@NESTLEVEL > 1
-      THROW;
-  END CATCH
-END
-GO
-ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(CONTAINER_ACTIVITY_TABLE) 
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -2040,9 +1954,10 @@ DECLARE @ErrorData VARBINARY(8000)
       , Status )
     SELECT @Id
          , @MAC
-         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END + SPACE(1) 
-           + '$(NAMEVALUES_TABLE)' + SPACE(1) + CAST(d.Id AS NCHAR(36))
-         , 'Instead'  
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
+         , 'Complete'  
     FROM deleted d
     JOIN inserted i
     on d.Id = i.Id;
@@ -2123,8 +2038,10 @@ DECLARE @ErrorData VARBINARY(8000)
       , Action
       , Status )
     SELECT @Id
-         ,@MAC
-         , 'Instead' + SPACE(1) + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END 
+         , @MAC
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Complete'  
     FROM deleted d
     LEFT JOIN inserted i
@@ -2141,7 +2058,9 @@ DECLARE @ErrorData VARBINARY(8000)
       , ErrorData)
     SELECT @Id
          , ISNULL( @MAC, 0x0 ) 
-         , 'Instead' + SPACE(1) + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END 
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Error'    
          , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
                        , ErrorInfo 
@@ -2210,10 +2129,7 @@ DECLARE @ErrorData VARBINARY(8000)
     SELECT @Id
          , d.ReportProcedure
          , @MAC
-         , 'Instead' + SPACE(1) + CASE WHEN i.Id IS NULL 
-                                       THEN 'DELETE' 
-                                       ELSE 'UPDATE' 
-                                       END
+         , 'Instead' 
     FROM deleted d
     LEFT JOIN inserted i
     on d.Id = i.Id;
@@ -2255,16 +2171,16 @@ ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(REPORT_ACTIVITY_TABLE)
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID('$(EHA_SCHEMA).trg_$(OFFSITE_ACTIVITY_TABLE)') IS NOT NULL
- DROP TRIGGER $(EHA_SCHEMA).trg_$(OFFSITE_ACTIVITY_TABLE)
+IF OBJECT_ID('$(EHA_SCHEMA).trg_$(SPOKE_ACTIVITY_TABLE)') IS NOT NULL
+ DROP TRIGGER $(EHA_SCHEMA).trg_$(SPOKE_ACTIVITY_TABLE)
 GO
 -------------------------------------------------------------------------------
 --    bwunder at yahoo dot com
 --    Desc: make note of all update and delete attempts 
 --    ASSERT: the caller has opened the Database Master Key  
 -------------------------------------------------------------------------------
-CREATE TRIGGER $(EHA_SCHEMA).trg_$(OFFSITE_ACTIVITY_TABLE) 
-ON $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
+CREATE TRIGGER $(EHA_SCHEMA).trg_$(SPOKE_ACTIVITY_TABLE) 
+ON $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
 $(WITH_OPTIONS)
 INSTEAD OF UPDATE, DELETE
 AS 
@@ -2291,22 +2207,16 @@ DECLARE @ErrorData VARBINARY(8000)
                                           , @MAC ) = 1 ) 
     OR (SELECT COUNT(*) FROM deleted) <> 1
       RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
     SELECT @Id
-         , d.CaptureInstance
-         , d.MinLsn
-         , d.MaxLsn
-         , d.[RowCount]
          , @MAC 
-         , 'Instead' + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Complete' 
     FROM deleted d
     LEFT JOIN inserted i
@@ -2315,23 +2225,17 @@ DECLARE @ErrorData VARBINARY(8000)
   BEGIN CATCH
     OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
     DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status 
       , ErrorData )
     SELECT @Id
-         , d.CaptureInstance
-         , d.MinLsn
-         , d.MaxLsn
-         , d.[RowCount]
          , ISNULL( @MAC, 0x0 ) 
-         , 'Instead' + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Error'    
          , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
                        , ErrorInfo 
@@ -2353,7 +2257,7 @@ DECLARE @ErrorData VARBINARY(8000)
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(OFFSITE_ACTIVITY_TABLE) 
+ADD SIGNATURE TO $(EHA_SCHEMA).trg_$(SPOKE_ACTIVITY_TABLE) 
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -2408,7 +2312,9 @@ DECLARE @ErrorData VARBINARY(8000)
          , d.Message
          , d.Signature
          , @MAC 
-         , 'Instead' + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Complete' 
     FROM deleted d
     LEFT JOIN inserted i
@@ -2433,7 +2339,9 @@ DECLARE @ErrorData VARBINARY(8000)
          , ISNULL( d.Message, 0x0 )
          , ISNULL( d.Signature, 0x0 )
          , ISNULL( @MAC, 0x0 ) 
-         , 'Instead' + CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+         , FORMATMESSAGE ( 'Instead %s: Id: %s' 
+                         , CASE WHEN i.Id IS NULL THEN 'DELETE' ELSE 'UPDATE' END
+                         , CAST( d.Id AS NVARCHAR(36) ) )
          , 'Error'    
          , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
                        , ErrorInfo 
@@ -2505,7 +2413,7 @@ BEGIN
           AND DB_ID(@DBName) IS NOT NULL
           AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
           AND EXISTS (SELECT * FROM sys.database_role_members 
-                      WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                      WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                       AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                       AND SYSTEM_USER = ORIGINAL_LOGIN() ) ) ;	
 END
@@ -2530,7 +2438,7 @@ $(WITH_OPTIONS)
 AS
 BEGIN 
   RETURN ( SELECT ENCRYPTBYKEY( KEY_GUID( '$(FILE_SYMMETRIC_KEY)' ) 
-                              , CAST( '$(VHD_LETTER):\' AS NVARCHAR(1024) )
+                              , CAST( '$(EXPORT_PATH)' AS NVARCHAR(1024) )
                               , 1
                               , @DbName )   
             FROM sys.certificates AS c
@@ -2540,7 +2448,7 @@ BEGIN
                          FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
                          ORDER BY CreateUTCDt DESC, Id DESC ) b
             CROSS JOIN sys.database_role_members r
-            WHERE r.role_principal_id = DATABASE_PRINCIPAL_ID ( 'EHAdminRole' ) 
+            WHERE r.role_principal_id = DATABASE_PRINCIPAL_ID ( '$(SPOKE_ADMIN_ROLE)' ) 
             AND r.member_principal_id = DATABASE_PRINCIPAL_ID ( ORIGINAL_LOGIN() )  
             AND b.KeyGuid = KEY_GUID( '$(SESSION_SYMMETRIC_KEY)' )
             AND c.name = '$(OBJECT_CERTIFICATE)'
@@ -2550,7 +2458,7 @@ BEGIN
             AND DB_ID(@DBName) IS NOT NULL
             AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
             AND EXISTS (SELECT * FROM sys.database_role_members 
-                        WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                        WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                         AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                         AND SYSTEM_USER = ORIGINAL_LOGIN() ) );	
 END
@@ -2594,7 +2502,7 @@ BEGIN
                           + PATINDEX('%PRN%', Name) = 0
                       AND NOT EXISTS ( SELECT COUNT(*) AS [Existing] 
                                        FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)
-                                       WHERE BackupNameBucket = $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+                                       WHERE BackupNameBucket = $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                                                      , '$(EHA_SCHEMA)'
                                                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                                                      , 'BackupNameBucket' 
@@ -2613,7 +2521,7 @@ BEGIN
                 AND @@NESTLEVEL > 1 
                 AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
                 AND EXISTS (SELECT * FROM sys.database_role_members 
-                            WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                            WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                             AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                             AND SYSTEM_USER = ORIGINAL_LOGIN() ) ) AS derived );
 END
@@ -2633,12 +2541,12 @@ GO
 CREATE FUNCTION $(EHA_SCHEMA).CheckPhrase 
   ( @tvp AS NAMEVALUETYPE READONLY )
 RETURNS @metatvp TABLE 
-  ( Status NVARCHAR(30)
+  ( Status NVARCHAR (36)
   , Signature VARBINARY(128) )
 $(WITH_OPTIONS)
 AS
 BEGIN
-  DECLARE @Status NVARCHAR(30)
+  DECLARE @Status NVARCHAR (36)
         , @Name NVARCHAR(448)
         , @UpValue NVARCHAR(128) 
         , @Value NVARCHAR(128) ;
@@ -2650,7 +2558,7 @@ BEGIN
               JOIN sys.crypt_properties cp
               ON c.thumbprint = cp.thumbprint
               CROSS JOIN sys.database_role_members r
-              WHERE r.role_principal_id = DATABASE_PRINCIPAL_ID ( '$(EHADMIN_ROLE)' ) 
+              WHERE r.role_principal_id = DATABASE_PRINCIPAL_ID ( '$(SPOKE_ADMIN_ROLE)' ) 
               AND r.member_principal_id = DATABASE_PRINCIPAL_ID ( ORIGINAL_LOGIN() )  
               AND c.name = 'ObjectCertificate'
               AND c.pvt_key_encryption_type = 'PW'
@@ -2658,7 +2566,7 @@ BEGIN
               AND @@NESTLEVEL > 1 -- no direct exec of function 
               AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
               AND EXISTS ( SELECT * FROM sys.database_role_members 
-                            WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                            WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                             AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                             AND SYSTEM_USER = ORIGINAL_LOGIN() ) )        
     BEGIN
@@ -2716,7 +2624,7 @@ BEGIN
                   SET @Status = 'duplicate';
                   IF NOT EXISTS ( SELECT *                  -- not already used  
                                   FROM $(EHA_SCHEMA).$(NAMEVALUES_TABLE) n
-                                  WHERE ValueBucket = $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+                                  WHERE ValueBucket = $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                                             , '$(EHA_SCHEMA)'
                                                                             , '$(NAMEVALUES_TABLE)'
                                                                             , 'ValueBucket' 
@@ -2779,7 +2687,7 @@ BEGIN
            AND DB_ID(@DBName) IS NOT NULL
            AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
            AND EXISTS ( SELECT * FROM sys.database_role_members 
-                        WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                        WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                         AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                         AND SYSTEM_USER = ORIGINAL_LOGIN() ) ); 	
 END
@@ -2795,10 +2703,9 @@ GO
 --    bwunder at yahoo dot com
 --    Desc: this/next available sibling node in depth aligned hierarchy 
 -- 
--- hierarchy is 4 container based levels root-srv-db-cert
--- use to dynamically identify objects dropped from the instance
--- not all possibilities are represented in following ASCII modulated thought 
--- hierarchy diagram connectors:
+-- hierarchy is 4 levels root-srv-db-cert
+-- identify objects added/dropped from the instance
+-- node connector key:
 --   | - catalog connection
 --   _ - cryptographic dependency: ecrypted by parent  
 --   x - cryptographic root: no cryptographic relationship to parent     
@@ -2887,7 +2794,7 @@ BEGIN
            AND DB_ID(@DBName) IS NOT NULL
            AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
            AND EXISTS ( SELECT * FROM sys.database_role_members 
-                        WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                        WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                         AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                         AND SYSTEM_USER = ORIGINAL_LOGIN() ) ); 
 END
@@ -2935,7 +2842,7 @@ BEGIN
                     AND DB_ID(@DBName) IS NOT NULL
                     AND IS_OBJECTSIGNED('OBJECT', @@PROCID, 'CERTIFICATE', c.thumbprint) = 1
                     AND EXISTS ( SELECT * FROM sys.database_role_members 
-                                  WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                                  WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                                   AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                                   AND SYSTEM_USER = ORIGINAL_LOGIN() ) );       
   RETURN ( @NewName );
@@ -2981,7 +2888,7 @@ BEGIN
                                        , 'CERTIFICATE'
                                        , c.thumbprint ) = 1
                     AND EXISTS ( SELECT * FROM sys.database_role_members 
-                                  WHERE [role_principal_id] = USER_ID('$(EHADMIN_ROLE)')
+                                  WHERE [role_principal_id] = USER_ID('$(SPOKE_ADMIN_ROLE)')
                                   AND USER_NAME ([member_principal_id]) = SYSTEM_USER 
                                   AND SYSTEM_USER = ORIGINAL_LOGIN() ) );       
   RETURN ( @NewName );
@@ -3017,7 +2924,7 @@ DECLARE @ErrorData VARBINARY(8000)
       , @Name NVARCHAR(448)
       , @NameBucket INT
       , @Parameters VARBINARY(8000)
-      , @Status NVARCHAR(30)
+      , @Status NVARCHAR (36)
       , @Value NVARCHAR(128)
       , @ValueBucket INT;
   BEGIN TRY
@@ -3071,12 +2978,12 @@ DECLARE @ErrorData VARBINARY(8000)
       END
     ELSE
       BEGIN
-        SET @NameBucket = $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+        SET @NameBucket = $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                , '$(EHA_SCHEMA)'
                                                , '$(NAMEVALUES_TABLE)'
                                                , 'NameBucket' 
                                                , @Name );
-        SET @ValueBucket = $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+        SET @ValueBucket = $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                 , '$(EHA_SCHEMA)'
                                                 , '$(NAMEVALUES_TABLE)'
                                                 , 'ValueBucket' 
@@ -3223,7 +3130,7 @@ SET NOCOUNT ON;
                             , 1
                             , @Name ) AS NVARCHAR(128) ) AS Value
     FROM $(EHA_SCHEMA).$(NAMEVALUES_TABLE)
-    WHERE NameBucket =  $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+    WHERE NameBucket =  $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                              , '$(EHA_SCHEMA)'
                                              , '$(NAMEVALUES_TABLE)'
                                              , 'NameBucket' 
@@ -3298,7 +3205,7 @@ DECLARE @ErrorData VARBINARY(8000)
       , @MAC VARBINARY(128)
       , @Name NVARCHAR(448)
       , @Parameters VARBINARY(8000)
-      , @Status NVARCHAR(30)
+      , @Status NVARCHAR (36)
       , @Value NVARCHAR(128);      
   BEGIN TRY
     SET @IsValid = 0;
@@ -3342,7 +3249,7 @@ DECLARE @ErrorData VARBINARY(8000)
     SELECT TOP(1) @IsValid = CASE WHEN tab.ValueBucket = CASE WHEN PATINDEX( '%.SALT', UPPER(derived.Name) ) > 0
                                                               THEN ABS( CHECKSUM( HASHBYTES( '$(HASHBYTES_ALGORITHM)'
                                                                                            , derived.Name ) ) ) 
-                                                              ELSE $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+                                                              ELSE $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                                                         , '$(EHA_SCHEMA)'
                                                                                         , '$(NAMEVALUES_TABLE)'
                                                                                         , 'NameBucket' 
@@ -3360,7 +3267,7 @@ DECLARE @ErrorData VARBINARY(8000)
     ON tab.NameBucket =  CASE WHEN PATINDEX( '%.SALT', UPPER(derived.Name) ) > 0
                               THEN ABS( CHECKSUM( HASHBYTES( '$(HASHBYTES_ALGORITHM)'
                                                            , derived.Name ) ) ) 
-                              ELSE $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+                              ELSE $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                         , '$(EHA_SCHEMA)'
                                                         , '$(NAMEVALUES_TABLE)'
                                                         , 'NameBucket' 
@@ -3547,8 +3454,8 @@ ADD SIGNATURE TO $(EHA_SCHEMA).MakeSalt
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID ('$(EHA_SCHEMA).SavePortableSymmetricKey') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).SavePortableSymmetricKey
+IF OBJECT_ID ('$(EHA_SCHEMA).AddPortableSymmetricKey') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).AddPortableSymmetricKey
 GO
 -------------------------------------------------------------------------------
 -- bwunder at yahoo dot com
@@ -3557,7 +3464,7 @@ GO
 -- Save the phrase as a private value and use that private value phrase as
 -- authorization to decipher any existing data encrypted buy the portable key
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).SavePortableSymmetricKey 
+CREATE PROCEDURE $(EHA_SCHEMA).AddPortableSymmetricKey 
  ( @KeyName NVARCHAR(128) 
  , @KeyIdentity VARBINARY(8000)
  , @KeySource VARBINARY(8000) )
@@ -3672,7 +3579,7 @@ SET NOCOUNT ON;
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).SavePortableSymmetricKey
+ADD SIGNATURE TO $(EHA_SCHEMA).AddPortableSymmetricKey
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -3795,8 +3702,8 @@ ADD SIGNATURE TO $(EHA_SCHEMA).GetPortableSymmetricKey
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID ('$(EHA_SCHEMA).SavePrivateValue') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).SavePrivateValue
+IF OBJECT_ID ('$(EHA_SCHEMA).AddPrivateValue') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).AddPrivateValue
 GO
 -------------------------------------------------------------------------------
 --    bwunder at yahoo dot com
@@ -3806,7 +3713,7 @@ GO
 --      to save private data in the audit trail specify 
 --          @AuditPrivateData = 1 
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).SavePrivateValue 
+CREATE PROCEDURE $(EHA_SCHEMA).AddPrivateValue 
  ( @Name NVARCHAR(448) 
  , @Value VARBINARY(8000) 
  , @EncryptionPhrase VARBINARY(8000) 
@@ -3922,7 +3829,7 @@ SET NOCOUNT ON;
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).SavePrivateValue
+ADD SIGNATURE TO $(EHA_SCHEMA).AddPrivateValue
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -4063,14 +3970,17 @@ $(WITH_OPTIONS)
 AS
 BEGIN 
 DECLARE @ActionType NVARCHAR(10) = 'Backup'
+      , @Backup VARBINARY(8000) 
       , @BackupDDL NVARCHAR(MAX)
       , @BackupName VARBINARY(8000)
       , @BackupNameBucket INT
       , @BackupPath VARBINARY(8000)
       , @BackupPhraseName NVARCHAR(448)
       , @BackupPhraseVersion SMALLINT
+      , @BulkLoadDDL NVARCHAR(1280)
       , @CipherType NCHAR(2)
       , @Colophon INT
+      , @ConversationHandle UNIQUEIDENTIFIER
       , @DbName NVARCHAR(128) = 'master'
       , @Edition SMALLINT = 1
       , @ErrorData VARBINARY(8000)  
@@ -4115,7 +4025,7 @@ SET NOCOUNT ON;
     -- DMK and File, Name & Value certs opened by successful book so OK to set encrypted values now 
     SET @Node = $(EHA_SCHEMA).GetNode ( @NodeName, @DbName, @@SERVERNAME )
     SET @BackupName = $(EHA_SCHEMA).NewMasterKeyBackupName( @NodeName );
-    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'BackupNameBucket' 
@@ -4124,13 +4034,13 @@ SET NOCOUNT ON;
     SET @BackupPath = $(EHA_SCHEMA).BackupPath(@DbName);
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
                                                      , 'key_guid' ) 
                                       , @DbName
-                                      ,'##MS_ServiceMasterKey##' );
+                                      , '##MS_ServiceMasterKey##' );
     EXEC @ReturnCode = sp_executesql @ObjectInfoDDL
                                    , N'@CipherType NCHAR(2) OUTPUT, @Colophon INT OUTPUT'
                                    , @CipherType OUTPUT
@@ -4183,10 +4093,12 @@ SET NOCOUNT ON;
                                                            ) AS NVARCHAR(128) ) ) 
     FROM @tvp;       
     EXEC @ReturnCode = sp_executesql @BackupDDL;
+
     IF @ReturnCode <> 0
       RAISERROR($(MESSAGE_OFFSET)12, 16, 1, @NodeName, '', '', '', @ActionType, @ReturnCode );
     ELSE
       RAISERROR($(MESSAGE_OFFSET)11, 0, 0, @NodeName, '', '', '', @ActionType );
+
     INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) 
       ( Id
       , DbName
@@ -4218,6 +4130,17 @@ SET NOCOUNT ON;
            , @Edition
            , @MAC
            , @CipherType );  
+
+    -- all keys - all versions
+    BEGIN DIALOG CONVERSATION @ConversationHandle
+    FROM SERVICE $(EHA_SCHEMA)InitiatorService
+    TO SERVICE '$(EHA_SCHEMA)TargetService'
+             , 'CURRENT DATABASE' 
+    ON CONTRACT [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/SendtoHub];
+
+    SEND ON CONVERSATION @ConversationHandle
+    MESSAGE TYPE [//$(SPOKE_DATABASE)/$(EHA_SCHEMA)/Backup] (@Id);
+
     CLOSE ALL SYMMETRIC KEYS;
   END TRY
   BEGIN CATCH
@@ -4395,7 +4318,7 @@ SET NOCOUNT ON;
       RAISERROR($(MESSAGE_OFFSET)11,0,0,@NodeName,'','','', @ActionType);
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -4583,7 +4506,7 @@ SET NOCOUNT ON;
     SET @Node = $(EHA_SCHEMA).GetNode ( @NodeName, @DbName, @@SERVERNAME )
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -4629,7 +4552,7 @@ SET NOCOUNT ON;
                                               , @ActionType ) AS EncryptedName ) AS derived;
     EXEC $(EHA_SCHEMA).AddNameValue @Backuptvp, @BackupPhraseVersion OUTPUT;   
     SET @BackupName = $(EHA_SCHEMA).NewMasterKeyBackupName( @DbName );
-    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'BackupNameBucket' 
@@ -4925,7 +4848,7 @@ SET NOCOUNT ON;
     -- @CipherType can be blank if encryption type not in ESKM, ESKP is it true???
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)22
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -5132,7 +5055,7 @@ SET NOCOUNT ON;
       RAISERROR($(MESSAGE_OFFSET)35,16,1,'Certificate', 'certificate not found');
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -5195,7 +5118,7 @@ SET NOCOUNT ON;
         EXEC $(EHA_SCHEMA).AddNameValue @Keytvp, @KeyPhraseVersion OUTPUT;
       END         
     SET @BackupName = $(EHA_SCHEMA).NewCertificateBackupName (@DbName, @CertificateName );
-    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(EHDB)'
+    SELECT @BackupNameBucket =  $(EHA_SCHEMA).AddSalt( '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'BackupNameBucket' 
@@ -5455,7 +5378,7 @@ SET NOCOUNT ON;
     ORDER BY CreateUTCDT DESC;   
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -5530,7 +5453,7 @@ SET NOCOUNT ON;
       RAISERROR($(MESSAGE_OFFSET)11, 0,0,'DATABASE', @DbName, 'CERTIFICATE', @CertificateName,'BACKUP');
     SET @ObjectInfoDDL = FORMATMESSAGE( $(MESSAGE_OFFSET)23
                                       , FORMATMESSAGE( $(MESSAGE_OFFSET)21
-                                                     , '$(EHDB)'
+                                                     , '$(SPOKE_DATABASE)'
                                                      , '$(EHA_SCHEMA)'
                                                      , '$(BACKUP_ACTIVITY_TABLE)'
                                                      , 'Colophon'
@@ -5645,35 +5568,32 @@ ADD SIGNATURE TO $(EHA_SCHEMA).RestoreCertificate
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
-IF OBJECT_ID ('$(EHA_SCHEMA).BackupContainer') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).BackupContainer
+IF OBJECT_ID ('$(EHA_SCHEMA).OffloadBackup') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).OffloadBackup
 GO
 -------------------------------------------------------------------------------
 --  bwunder at yahoo dot com
---  Desc: copy the truecrypt Containers into the database
---        could be any file that the service account can access
+--  Desc: load the binary content of a file to a varbinary var for
+--        export to hub and/or offsite
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).BackupContainer
-  ( @FilePath NVARCHAR(1024)  
-  , @FileName NVARCHAR(128) 
-  , @Tag NVARCHAR(128) = 'DEFAULT' )
+CREATE PROCEDURE $(EHA_SCHEMA).OffloadBackup
+  ( @BackupId NCHAR(36) )
 $(WITH_OPTIONS)
 AS
 BEGIN
 DECLARE @ErrorData VARBINARY(8000)
-      , @GetContainerDDL NVARCHAR(512)
+      , @GetExportDDL NVARCHAR(512)
       , @Id NCHAR(36)
       , @MAC VARBINARY(128)
-      , @Parameters VARBINARY (8000)
+      , @Parameters VARBINARY (8000) 
+          = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                        , FORMATMESSAGE( '@BackupId = ''%s''', @BackupId )
+                        , 1
+                        , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) )
       , @ReturnCode INT
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( '@FilePath = ''%s'', @FileName = ''%s'', @Tag = ''%s'''
-                                                 , @FilePath, @FileName, @Tag )
-                                  , 1
-                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
@@ -5693,31 +5613,32 @@ SET NOCOUNT ON;
                                           , @MAC ) = 1 ) 
       RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
     -- process user must be able to read @FileName from @FilePath
-    SET @GetContainerDDL = FORMATMESSAGE ( N'INSERT $(EHA_SCHEMA).$(CONTAINERS_TABLE) ( Id, FileImage, Signature )' + SPACE(1) 
-                                         + N'SELECT @Id, CAST(c.bulkcolumn AS VARBINARY(MAX) )'
-                                         + N', SIGNBYCERT(CERT_ID(''$(AUTHENTICITY_CERTIFICATE)''),  CAST(c.bulkcolumn AS VARBINARY(8000) ) )' + SPACE(1) 
-                                         + N'FROM OPENROWSET(BULK ''%s%s'', SINGLE_BLOB ) AS c'
-                                         , @FilePath, @FileName );
-    EXEC @ReturnCode = sp_executesql @GetContainerDDL, N'@Id NCHAR(36)', @Id;
+    SET @GetExportDDL = ( SELECT FORMATMESSAGE ( N'SELECT %s'
+                                               + N' , c.bulkcolumn ' + SPACE(1) 
+                                               + N'FROM OPENROWSET( BULK ''%s%s'', SINGLE_BLOB ) AS c'
+                                               , CAST( Id AS NCHAR(36) )
+                                               , CAST( DECRYPTBYKEY( BackupPath ) AS NVARCHAR(1024) )
+                                               , CAST( DECRYPTBYKEY( BackupName ) AS NVARCHAR(128) ) )
+                          FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)
+                          WHERE Id = @BackupId );
+    -- all keys - all versions
+    INSERT $(EHA_SCHEMA).$(BACKUPS_SYNONYM) ( Id, Export )
+    EXEC @ReturnCode = sp_executesql @GetExportDDL;
     IF @ReturnCode <> 0  
-      RAISERROR($(MESSAGE_OFFSET)12,16,1,'@GetContainerDDL', @FilePath, @FileName, '', '' ,@ReturnCode);
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
+      RAISERROR($(MESSAGE_OFFSET)12,16,1,'@GetExportDDL', @BackupId, '', '', '' ,@ReturnCode);
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , FileName
-      , FilePath
-      , SizeInBytes
       , MAC
       , Action
       , Status )
     SELECT  @Id
-           , ENCRYPTBYKEY(KEY_GUID('$(FILE_SYMMETRIC_KEY)'),@FileName, 1, @Id )
-           , ENCRYPTBYKEY(KEY_GUID('$(FILE_SYMMETRIC_KEY)'),@FilePath, 1, @FileName )
-           , LEN(FileImage)  
-           , @MAC
-           , OBJECT_NAME(@@PROCID)
-           , 'Complete'
-     FROM $(EHA_SCHEMA).$(CONTAINERS_TABLE)
-     WHERE Id = @Id;
+          , @MAC
+          , OBJECT_NAME(@@PROCID)
+          , 'Complete'
+     FROM $(EHA_SCHEMA).$(BACKUPS_SYNONYM) AS syn
+     JOIN $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) AS tab
+     ON syn.Id = tab.Id
+     WHERE tab.Id = @BackupId;
     CLOSE ALL SYMMETRIC KEYS;
   END TRY
   BEGIN CATCH
@@ -5727,72 +5648,66 @@ SET NOCOUNT ON;
       BEGIN
         OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
         DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-        INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
+        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
           ( Id
-          , FileName
-          , FilePath
-          , SizeInBytes
           , MAC
           , Action
           , Status 
           , ErrorData )
         SELECT @Id
-              , ISNULL( ENCRYPTBYKEY(KEY_GUID('$(FILE_SYMMETRIC_KEY)'),@FileName, 1, @Id ), 0x0 )
-              , ISNULL( ENCRYPTBYKEY(KEY_GUID('$(FILE_SYMMETRIC_KEY)'),@FilePath, 1, @FileName ), 0x0 )
-              , 0 
               , ISNULL( @MAC, 0x0 )
               , OBJECT_NAME(@@PROCID)
               , 'Error'
               , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
-                            , ErrorInfo 
+                            , derived.ErrorInfo 
                             , 1
                             , @Id )
-        FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
-                                  , ERROR_NUMBER()
-                                  , ERROR_SEVERITY()
-                                  , ERROR_STATE()
-                                  , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
-                                  , ERROR_LINE()
-                                  , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
+        FROM ( SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
+                                   , ERROR_NUMBER()
+                                   , ERROR_SEVERITY()
+                                   , ERROR_STATE()
+                                   , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
+                                   , ERROR_LINE()
+                                   , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived
+        CROSS JOIN $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) AS tab
+        WHERE tab.Id = @BackupId;
         CLOSE ALL SYMMETRIC KEYS;
       END
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).BackupContainer
+ADD SIGNATURE TO $(EHA_SCHEMA).OffloadBackup
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
 
-IF OBJECT_ID ('$(EHA_SCHEMA).SendOffsiteCDC') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).SendOffSiteCDC
+IF OBJECT_ID ('$(EHA_SCHEMA).PushCapturedChanges') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).PushCapturedChanges
 GO
 -------------------------------------------------------------------------------
 --  bwunder at yahoo dot com
---  Desc: copy changes offsite using change data capture
+--  Desc: Offload hierarchy backup catalog changes for Change Data Tracking
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).SendOffsiteCDC
+CREATE PROCEDURE $(EHA_SCHEMA).PushCapturedChanges
 $(WITH_OPTIONS)
 AS
 BEGIN
-DECLARE @CaptureInstance NVARCHAR(128)
-      , @ErrorData VARBINARY(8000)
-      , @GetContainerDDL NVARCHAR(512)
+DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
-      , @LastTransferredUTCDT DATETIME2
+      , @CaptureInstanceId NCHAR(36)
       , @MAC VARBINARY(128)
       , @MaxLsn BINARY(10)
       , @MinLsn BINARY(10)
-      , @MinLsnSinceTransfer BINARY(10)
-      , @Parameters VARBINARY (8000)
+      , @Parameters VARBINARY (8000) 
+          = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                        , ''
+                        , 1
+                        , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) ) 
       , @UTCOffset INT = DATEDIFF( hh, SYSUTCDATETIME(), SYSDATETIME() );
 SET NOCOUNT ON;
   BEGIN TRY
-    SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , ''
-                                  , 1
-                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
-    CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
+    -- do not close AUDIT_SYMMETRIC_KEY - used multiple times
+    -- Will also need to book more Ids this one is used again at completion and in CATCH block 
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
                           , @Id OUTPUT
@@ -5810,8 +5725,6 @@ SET NOCOUNT ON;
                                                          , Status ) AS NVARCHAR(128) )
                                           , @MAC ) = 1 ) 
       RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    -- bookings first to protect DRI at target
-    CLOSE ALL SYMMETRIC KEYS;
     IF EXISTS (SELECT * FROM sys.dm_cdc_errors)
       RAISERROR( $(MESSAGE_OFFSET)35, 16, 1
                , 'ChangeDataCapture'
@@ -5825,20 +5738,38 @@ SET NOCOUNT ON;
       RAISERROR( 2147483635, 16, 1
                , 'ChangeDataCapture'
                , 'no changes found');
-    -- start just after the last transferred record for the capture instance
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(BOOKINGS_TABLE)' 
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_BOOKINGS_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    -- null if date range is not in capture set
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-    -- get_min_lsn will always return an LSN or 0x00000000000000000000, never null if valid    
-    SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_BOOKINGS_SYNONYM)
+    -- start rolling transfer by table
+    -- a remote onesy to get the datetime of the last transferred change for the table
+    -- nested derived tables are supposed to make it faster? have not checked yet
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(BOOKINGS_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(BOOKINGS_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BOOKINGS_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @CaptureInstanceId OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@CaptureInstanceId);
+    INSERT $(EHA_SCHEMA).$(BOOKINGS_SYNONYM)
       ( Id
       , ServerName
       , ProcId
@@ -5859,36 +5790,47 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BOOKINGS_TABLE)
                                           ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
-    SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 ) 
-          , @MaxLsn
-          , @@ROWCOUNT  
+    SELECT  @CaptureInstanceId
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(BOOKINGS_TABLE) changes', @@ROWCOUNT )
           , 'Complete'
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(BOOKINGS_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)'
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM  $(EHA_SCHEMA).$(LINK_BACKUP_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-       SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_BACKUP_ACTIVITY_SYNONYM)
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn ) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @CaptureInstanceId OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@CaptureInstanceId);
+    INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_SYNONYM)
       ( Id
       , ServerName
       , DbName
@@ -5933,127 +5875,47 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_net_changes_$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)
                                                 ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
-    SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
+    SELECT  @CaptureInstanceId
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE) changes', @@ROWCOUNT )
           , 'Complete'
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(CONTAINERS_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_CONTAINER_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-       SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_CONTAINERS_SYNONYM)
-      ( Id
-      , ServerName
-      , Tag
-      , FileImage
-      , Signature )
-    SELECT Id
-          , ServerName
-          , Tag
-          , FileImage
-          , Signature
-    FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINERS_TABLE)
-                                            ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-      ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
-      , MAC
-      , Action
-      , Status )
-    SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
-          , @MAC
-          , OBJECT_NAME(@@PROCID)
-          , 'Complete' 
-    FROM cdc.change_tables
-    WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(CONTAINERS_TABLE)' );
-    -- same last transfer info as Container
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)';
-    SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_CONTAINER_ACTIVITY_SYNONYM)
-      ( Id
-      , ServerName
-      , FileName
-      , FilePath
-      , SizeInBytes
-      , MAC
-      , Action
-      , Status
-      , ErrorData
-      , CreateUTCDT
-      , CreateUser )
-    SELECT  Id
-          , ServerName
-          , FileName
-          , FilePath
-          , SizeInBytes
-          , MAC
-          , Action
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser 
-    FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)
-                                                    ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-      ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
-      , MAC
-      , Action
-      , Status )
-    SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
-          , @MAC
-          , OBJECT_NAME(@@PROCID)
-          , 'Complete'
-    FROM cdc.change_tables
-    WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_NAMEVALUES_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-    SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_NAMEVALUES_SYNONYM)
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(NAMEVALUES_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUES_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn ) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @Id OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @Id
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+    INSERT $(EHA_SCHEMA).$(NAMEVALUES_SYNONYM)
       ( Id
       , ServerName
       , NameBucket
@@ -6074,37 +5936,47 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)
                                             ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
     SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(NAMEVALUES_TABLE) changes', @@ROWCOUNT )
           , 'Complete'
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(NAMEVALUES_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-   
-    SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                        , @Parameters
+                        , @CaptureInstanceId OUTPUT
+                        , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+    INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_SYNONYM)
       ( Id
       , ServerName
       , MAC
@@ -6123,36 +5995,47 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)
                                                     ( @MinLsn, @MaxLsn, 'all'); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
     SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE) changes', @@ROWCOUNT )
           , 'Complete' 
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_NOTIFICATION_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-       SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_NOTIFICATION_ACTIVITY_SYNONYM)
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+                                  , @MinLsn, @MaxLsn ) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @CaptureInstanceId OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+    INSERT $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_SYNONYM)
       ( Id
       , ServerName
       , ConversationHandle
@@ -6179,44 +6062,50 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE) 
                                                   ( @MinLsn, @MaxLsn, 'all' ); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
     SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(NOTIFICATION_ACTIVITY_TABLE) changes', @@ROWCOUNT )
           , 'Complete' 
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_OFFSITE_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-   
-    SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_OFFSITE_ACTIVITY_SYNONYM)
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(SPOKE_ACTIVITY_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn ) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @CaptureInstanceId OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@CaptureInstanceId);
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_SYNONYM)
       ( Id
       , ServerName
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
       , MAC
-      , [RowCount]
       , Action
       , Status
       , ErrorData
@@ -6224,48 +6113,55 @@ SET NOCOUNT ON;
       , CreateUser)
     SELECT Id
           , ServerName
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
           , MAC
-          , [RowCount]
           , Action
           , Status
           , ErrorData
           , CreateUTCDT
           , CreateUser 
-    FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE) 
+    FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE) 
                                                   ( @MinLsn, @MaxLsn, 'all' ); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
-    SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
+    SELECT  @CaptureInstanceId
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE) changes', @@ROWCOUNT )
           , 'Complete'
     FROM cdc.change_tables
-    WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)' );
-    SET @CaptureInstance = '$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)';
-    SET @LastTransferredUTCDT = ( SELECT TOP (1) DATEADD( hh, @UTCOffset, CreateUTCDT ) 
-                                  FROM $(EHA_SCHEMA).$(LINK_REPORT_ACTIVITY_SYNONYM)
-                                  WHERE ServerName = @@SERVERNAME
-                                  ORDER BY CreateUTCDT DESC );
-    SET @MinLsnSinceTransfer = sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
-                                                          , @LastTransferredUTCDT )
-       SET @MinLsn = sys.fn_cdc_get_min_lsn(@CaptureInstance); 
-    IF @MinLsn < ISNULL( @MinLsnSinceTransfer , 0x0 )
-      SET @MinLsn = @MinLsnSinceTransfer;
-    INSERT $(EHA_SCHEMA).$(LINK_REPORT_ACTIVITY_SYNONYM)
+    WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)' );
+
+    SET @MinLsn = ( SELECT ISNULL( cdc.MinLsnSinceTransfer, cdc.MinAvailableLsn )
+                    FROM (SELECT sys.fn_cdc_map_time_to_lsn ( 'smallest greater than or equal'
+                                                            , DATEADD( hh, @UTCOffset, lnk.CreateUTCDT ) ) AS MinLsnSinceTransfer
+                              ,  sys.fn_cdc_get_min_lsn( '$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)' ) AS MinAvailableLsn  
+                          FROM (SELECT TOP (1) CreateUTCDT
+                                FROM $(EHA_SCHEMA).$(REPORT_ACTIVITY_SYNONYM)
+                                WHERE ServerName = @@SERVERNAME
+                                ORDER BY CreateUTCDT DESC, Id DESC ) AS lnk ) AS cdc );
+    SET @Parameters = ENCRYPTBYKEY( KEY_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                  , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+                                                 , @MinLsn, @MaxLsn ) );
+    EXEC $(EHA_SCHEMA).Book @@PROCID
+                          , @Parameters
+                          , @CaptureInstanceId OUTPUT
+                          , @MAC OUTPUT; 
+    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+                    WHERE Id = @CaptureInstanceId
+                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+                                          , CAST(CHECKSUM( Id
+                                                         , @@PROCID   
+                                                         , ObjectName
+                                                         , @Parameters
+                                                         , KeyGuid
+                                                         , Status ) AS NVARCHAR(128) )
+                                          , @MAC ) = 1 ) 
+      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@CaptureInstanceId);
+    INSERT $(EHA_SCHEMA).$(REPORT_ACTIVITY_SYNONYM)
       ( Id
       , ServerName
       , ReportProcedure
@@ -6288,611 +6184,20 @@ SET NOCOUNT ON;
           , CreateUser 
     FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) 
                                                 ( @MinLsn, @MaxLsn, 'all' ); 
-    INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
-      , CaptureInstance
-      , MinLsn
-      , MaxLsn
-      , [RowCount]
       , MAC
       , Action
       , Status )
     SELECT  @Id
-          , capture_instance
-          , ISNULL( @MinLsn, 0x0 )
-          , @MaxLsn
-          , @@ROWCOUNT  
           , @MAC
-          , OBJECT_NAME(@@PROCID)
+          , FORMATMESSAGE( 'send %d $(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) changes', @@ROWCOUNT )
           , 'Complete'
     FROM cdc.change_tables
     WHERE source_object_id = OBJECT_ID( '$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)' );
-  END TRY
-  BEGIN CATCH
-    IF @Id IS NULL
-      THROW;
-    ELSE
-      BEGIN
-        OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
-        DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status 
-          , ErrorData )
-        SELECT @Id
-             , ISNULL( @CaptureInstance, 'unknown' ) -- has to be unique
-             , ISNULL( @MinLsn, 0x )
-             , ISNULL( @MaxLsn, 0x )  
-             , 0  
-             , ISNULL( @MAC, 0x )
-             , OBJECT_NAME(@@PROCID)
-             , 'Error'
-             , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
-                           , ErrorInfo 
-                           , 1
-                           , @Id )
-        FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
-                                  , ERROR_NUMBER()
-                                  , ERROR_SEVERITY()
-                                  , ERROR_STATE()
-                                  , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
-                                  , ERROR_LINE()
-                                  , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
-        CLOSE ALL SYMMETRIC KEYS;
-      END
-  END CATCH
-END
-GO
-ADD SIGNATURE TO $(EHA_SCHEMA).SendOffsiteCDC
-BY CERTIFICATE $(OBJECT_CERTIFICATE)
-WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
-GO
 
-IF OBJECT_ID ('$(EHA_SCHEMA).SendOffsiteTC') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).SendOffSiteTC
-GO
--------------------------------------------------------------------------------
---  bwunder at yahoo dot com
---  Desc: copy changes offsite using track changes
--------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).SendOffsiteTC
-$(WITH_OPTIONS)
-AS
-BEGIN
-DECLARE @BeginLsn BINARY(10)
-      , @CaptureInstance NVARCHAR(128)
-      , @ErrorData VARBINARY(8000)
-      , @GetContainerDDL NVARCHAR(512)
-      , @Id NCHAR(36)
-      , @LastLsn BINARY(10) -- the previous MaxLsn
-      , @MAC VARBINARY(128)
-      , @MaxLsn BINARY(10)
-      , @MinLsn BINARY(10)
-      , @Parameters VARBINARY (8000)
-      , @RowCount INT
-      , @StartDT DATETIME2 = SYSUTCDATETIME();
-SET NOCOUNT ON;
-  BEGIN TRY
-    SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , ''
-                                  , 1
-                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
-    CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
-    EXEC $(EHA_SCHEMA).Book @@PROCID
-                          , @Parameters
-                          , @Id OUTPUT
-                          , @MAC OUTPUT; 
-    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
-                    WHERE Id = @Id
-                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
-                    AND ObjectName = OBJECT_NAME(@@PROCID) 
-                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
-                                          , CAST(CHECKSUM( Id
-                                                         , @@PROCID   
-                                                         , ObjectName
-                                                         , @Parameters
-                                                         , KeyGuid
-                                                         , Status ) AS NVARCHAR(128) )
-                                          , @MAC ) = 1 ) 
-      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    -- bookings first to protect DRI at target
     CLOSE ALL SYMMETRIC KEYS;
 
-    IF EXISTS (SELECT * FROM sys.dm_cdc_errors)
-      RAISERROR( $(MESSAGE_OFFSET)35, 16, 1
-               ,'CDC state'
-               ,'cdc_errors detected');
-    -- no changes after this instant in time will be processesed at this time
-    SET @Maxlsn = sys.fn_cdc_decrement_lsn(sys.fn_cdc_get_max_lsn());
-    -- verify that first row to insert is not already on target
-    SET @MinLsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(BOOKINGS_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(BOOKINGS_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), sys.fn_cdc_increment_lsn(0x000000000000000000) );
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_BOOKINGS_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BOOKINGS_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_BOOKINGS_SYNONYM)
-          ( Id
-          , ServerName
-          , ProcId
-          , ObjectName
-          , Parameters
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser)
-        SELECT Id
-             , ServerName
-             , ProcId
-             , ObjectName
-             , Parameters
-             , Status
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BOOKINGS_TABLE)
-                                             ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT @Id
-             , capture_instance
-             , @BeginLsn
-             , @MaxLsn
-             , @RowCount  
-             , @MAC
-             , OBJECT_NAME(@@PROCID)
-             , 'Complete'
-         FROM cdc.change_tables
-         WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)');
-      END
-    -- verify that first row to insert is not already on target
-    SET @MinLsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_BACKUP_ACTIVITY_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_BACKUP_ACTIVITY_SYNONYM)
-          ( Id
-          , ServerName
-          , DbName
-          , Node
-          , Level
-          , NodeName
-          , BackupName
-          , BackupNameBucket
-          , UseHash
-          , BackupPath
-          , BackupPhraseVersion
-          , KeyPhraseVersion
-          , Colophon
-          , Edition
-          , MAC
-          , Action
-          , Status
-          , CipherType
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser)
-        SELECT Id
-             , ServerName
-             , DbName
-             , Node.ToString()
-             , Level
-             , NodeName
-             , BackupName
-             , BackupNameBucket
-             , UseHash
-             , BackupPath
-             , BackupPhraseVersion
-             , KeyPhraseVersion
-             , Colophon
-             , Edition
-             , MAC
-             , Action
-             , Status
-             , CipherType
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_net_changes_$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)
-                                                    ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(CONTAINERS_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(CONTAINERS_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_CONTAINERS_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINERS_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_CONTAINERS_SYNONYM)
-          ( Id
-          , ServerName
-          , Tag
-          , FileImage
-          , Signature)
-        SELECT Id
-             , ServerName
-             , Tag
-             , FileImage
-             , Signature
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINERS_TABLE)
-                                               ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(CONTAINERS_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_CONTAINER_ACTIVITY_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_CONTAINER_ACTIVITY_SYNONYM)
-          ( Id
-          , ServerName
-          , FileName
-          , FilePath
-          , SizeInBytes
-          , MAC
-          , Action
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser )
-        SELECT Id
-             , ServerName
-             , FileName
-             , FilePath
-             , SizeInBytes
-             , MAC
-             , Action
-             , Status
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)
-                                                       ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(CONTAINER_ACTIVITY_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(NAMEVALUES_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_NAMEVALUES_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_NAMEVALUES_SYNONYM)
-          ( Id
-          , ServerName
-          , NameBucket
-          , ValueBucket
-          , Version
-          , Name
-          , Value
-          , CreateUTCDT
-          , CreateUser)
-        SELECT Id
-             , ServerName
-             , NameBucket
-             , ValueBucket
-             , Version
-             , Name
-             , Value
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)
-                                                ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)
-          ( Id
-          , ServerName
-          , MAC
-          , Action
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser )
-        SELECT Id
-             , ServerName
-             , MAC
-             , Action
-             , Status
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)
-                                                        ( @MinLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_OFFSITE_ACTIVITY_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_OFFSITE_ACTIVITY_SYNONYM)
-          ( Id
-          , ServerName
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , MAC
-          , [RowCount]
-          , Action
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser)
-        SELECT Id
-             , ServerName
-             , CaptureInstance
-             , MinLsn
-             , MaxLsn
-             , MAC
-             , [RowCount]
-             , Action
-             , Status
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE) 
-                                                     ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT  @Id
-               , @CaptureInstance
-               , @BeginLsn
-               , @MaxLsn
-               , @RowCount  
-               , @MAC
-               , OBJECT_NAME(@@PROCID)
-               , 'Complete'
-        FROM cdc.change_tables
-        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(OFFSITE_ACTIVITY_TABLE)');
-      END
-    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)');
-    SET @LastLsn = 
-        ISNULL( ( SELECT TOP (1) MaxLsn 
-                  FROM $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)
-                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)'
-                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
-    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
-    IF NOT EXISTS (SELECT * 
-                   FROM $(EHA_SCHEMA).$(LINK_REPORT_ACTIVITY_SYNONYM)
-                   WHERE Id = ( SELECT TOP (1) Id
-                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)
-                                                                    ( @BeginLsn, @BeginLsn, 'all') 
-                                ORDER BY __$start_lsn DESC ) 
-                   AND @LastLsn > = @MinLsn ) -- means something is missing  
-      BEGIN
-        INSERT $(EHA_SCHEMA).$(LINK_REPORT_ACTIVITY_SYNONYM)
-          ( Id
-          , ServerName
-          , ReportProcedure
-          , Duration_ms
-          , RowsReturned
-          , MAC
-          , Status
-          , ErrorData
-          , CreateUTCDT
-          , CreateUser )
-        SELECT Id
-             , ServerName
-             , ReportProcedure
-             , Duration_ms
-             , RowsReturned
-             , MAC
-             , Status
-             , ErrorData
-             , CreateUTCDT
-             , CreateUser 
-        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) 
-                                                   ( @BeginLsn, @MaxLsn, 'all'); 
-        SET @RowCount = @@ROWCOUNT;
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
-          ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
-          , MAC
-          , Action
-          , Status )
-        SELECT @Id
-             , capture_instance
-             , @MinLsn
-             , @MaxLsn
-             , @RowCount  
-             , @MAC
-             , OBJECT_NAME(@@PROCID)
-             , 'Complete'
-         FROM cdc.change_tables
-         WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)');
-      END
   END TRY
   BEGIN CATCH
     IF @Id IS NULL
@@ -6901,22 +6206,14 @@ SET NOCOUNT ON;
       BEGIN
         OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
         DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-        INSERT $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) 
+        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
           ( Id
-          , CaptureInstance
-          , MinLsn
-          , MaxLsn
-          , [RowCount]
           , MAC
           , Action
           , Status 
           , ErrorData )
         SELECT @Id
-             , ISNULL( @CaptureInstance, CAST(NEWID() AS NVARCHAR(128) ) )
-             , ISNULL( @BeginLsn, 0x )
-             , ISNULL( @MaxLsn, 0x )  
              , ISNULL( @MAC, 0x )
-             , ISNULL( @RowCount, 0 )
              , OBJECT_NAME(@@PROCID)
              , 'Error'
              , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
@@ -6935,40 +6232,464 @@ SET NOCOUNT ON;
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).SendOffsiteTC
+ADD SIGNATURE TO $(EHA_SCHEMA).PushCapturedChanges
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
 
-IF OBJECT_ID ('$(EHA_SCHEMA).RecallContainer') IS NOT NULL
-   DROP PROCEDURE $(EHA_SCHEMA).RecallContainer
+--IF OBJECT_ID ('$(EHA_SCHEMA).PushTrackedChanges') IS NOT NULL
+--   DROP PROCEDURE $(EHA_SCHEMA).PushTrackedChanges
+--GO
+---------------------------------------------------------------------------------
+----  bwunder at yahoo dot com
+----  Desc: copy changes offsite using track changes
+---------------------------------------------------------------------------------
+--CREATE PROCEDURE $(EHA_SCHEMA).PushTrackedChanges
+--$(WITH_OPTIONS)
+--AS
+--BEGIN
+--DECLARE @CaptureInstance NVARCHAR(128)
+--      , @ErrorData VARBINARY(8000)
+--      , @Id NCHAR(36)
+--      , @LastSyncVersion BIGINT 
+--      , @MAC VARBINARY(128)
+--      , @Parameters VARBINARY (8000) = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
+--                                                   , ''
+--                                                   , 1
+--                                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) )
+--      , @RowCount INT
+--      , @StartDT DATETIME2 = SYSUTCDATETIME()
+--      , @SyncVersion BIGINT;
+--SET NOCOUNT ON;
+--  BEGIN TRY
+--    CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
+--    EXEC $(EHA_SCHEMA).Book @@PROCID
+--                          , @Parameters
+--                          , @Id OUTPUT
+--                          , @MAC OUTPUT; 
+--    IF NOT EXISTS ( SELECT * FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
+--                    WHERE Id = @Id
+--                    AND KeyGuid = CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
+--                    AND ObjectName = OBJECT_NAME(@@PROCID) 
+--                    AND VERIFYSIGNEDBYCERT( CERT_ID('$(AUTHENTICITY_CERTIFICATE)')
+--                                          , CAST(CHECKSUM( Id
+--                                                         , @@PROCID   
+--                                                         , ObjectName
+--                                                         , @Parameters
+--                                                         , KeyGuid
+--                                                         , Status ) AS NVARCHAR(128) )
+--                                          , @MAC ) = 1 ) 
+--      RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
+--    -- bookings first to protect DRI at target
+--    CLOSE ALL SYMMETRIC KEYS;
+--    SET @MinValidVersion = 
+--    SET @LastSyncVersion = (SELECT LastSyncVersion FROM);
+--    IF @LastSyncVersion
+--    INSERT $(EHA_SCHEMA).$(BOOKINGS_SYNONYM)
+--      ( Id
+--      , ServerName
+--      , ProcId
+--      , ObjectName
+--      , Parameters
+--      , Status
+--      , ErrorData
+--      , CreateUTCDT
+--      , CreateUser)
+--    SELECT Id
+--          , ServerName
+--          , ProcId
+--          , ObjectName
+--          , Parameters
+--          , Status
+--          , ErrorData
+--          , CreateUTCDT
+--          , CreateUser 
+--    FROM $(EHA_SCHEMA)_$(BOOKINGS_TABLE) AS b
+--    CROSS APPLY CHANGETABLE (CHANGES $(EHA_SCHEMA).$(BOOKINGS_SYNONYM), @last_sync_version) AS c;
+--    SET @RowCount = @@ROWCOUNT 
+--    IF @RowCount > 0
+--      BEGIN
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , MAC
+--          , Action
+--          , Status )
+--        SELECT @Id
+--              , @MAC
+--              , FORMATMESSAGE( 'CHANGETABLE (CHANGES $(EHA_SCHEMA).$(BOOKINGS_SYNONYM), version=%d)', @LastSyncVersion)
+--              , 'Complete'
+--          FROM cdc.change_tables
+--          WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)');
+
+--    SET @MinValidVersion = 
+--    SET @LastSyncVersion = (SELECT LastSyncVersion FROM);
+--    IF @LastSyncVersion
+--    INSERT $(EHA_SCHEMA).$(BACKUP_ACTIVITY_SYNONYM)
+--      ( Id
+--      , ServerName
+--      , DbName
+--      , Node
+--      , Level
+--      , NodeName
+--      , BackupName
+--      , BackupNameBucket
+--      , UseHash
+--      , BackupPath
+--      , BackupPhraseVersion
+--      , KeyPhraseVersion
+--      , Colophon
+--      , Edition
+--      , MAC
+--      , Action
+--      , Status
+--      , CipherType
+--      , ErrorData
+--      , CreateUTCDT
+--      , CreateUser)
+--    SELECT Id
+--          , ServerName
+--          , DbName
+--          , Node.ToString()
+--          , Level
+--          , NodeName
+--          , BackupName
+--          , BackupNameBucket
+--          , UseHash
+--          , BackupPath
+--          , BackupPhraseVersion
+--          , KeyPhraseVersion
+--          , Colophon
+--          , Edition
+--          , MAC
+--          , Action
+--          , Status
+--          , CipherType
+--          , ErrorData
+--          , CreateUTCDT
+--          , CreateUser 
+--    FROM $(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE) AS b
+--    CROSS APPLY CHANGETABLE (CHANGES $(EHA_SCHEMA).$(BACKUP_ACTIVITY_SYNONYM), @last_sync_version) AS c;
+--    IF @@ROWCOUNT > 0        
+--      INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--        ( Id
+--        , MAC
+--        , Action
+--        , Status )
+--      SELECT @Id
+--            , @MAC
+--            , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(BACKUP_ACTIVITY_TABLE) ( %#x, %#x, ''all'')'
+--                          , @MinLsn, @MaxLsn, 'all')
+--            , 'Complete'
+--        FROM cdc.change_tables
+--        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)');
+
+--    INSERT $(EHA_SCHEMA).$(NAMEVALUES_SYNONYM)
+--      ( Id
+--      , ServerName
+--      , NameBucket
+--      , ValueBucket
+--      , Version
+--      , Name
+--      , Value
+--      , CreateUTCDT
+--      , CreateUser)
+--    SELECT Id
+--          , ServerName
+--          , NameBucket
+--          , ValueBucket
+--          , Version
+--          , Name
+--          , Value
+--          , CreateUTCDT
+--          , CreateUser 
+--    FROM $(EHA_SCHEMA)_$(NAMEVALUES_TABLE) AS b
+--    CROSS APPLY CHANGETABLE (CHANGES $(EHA_SCHEMA).$(NAMEVALUES_SYNONYM), @last_sync_version) AS c;
+--    IF @@ROWCOUNT > 0        
+--      INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--        ( Id
+--        , MAC
+--        , Action
+--        , Status )
+--      SELECT @Id
+--            , @MAC
+--            , FORMATMESSAGE( 'cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUES_TABLE) ( %#x, %#x, ''all'')'
+--                          , @MinLsn, @MaxLsn, 'all')
+--            , 'Complete'
+--        FROM cdc.change_tables
+--        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(BOOKINGS_TABLE)');
+
+--        SET @RowCount = @@ROWCOUNT;
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , [RowCount]
+--          , MAC
+--          , Action
+--          , Status )
+--        SELECT  @Id
+--               , @CaptureInstance
+--               , @BeginLsn
+--               , @MaxLsn
+--               , @RowCount  
+--               , @MAC
+--               , OBJECT_NAME(@@PROCID)
+--               , 'Complete'
+--        FROM cdc.change_tables
+--        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(NAMEVALUES_TABLE)');
+--      END
+--    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)');
+--    SET @LastLsn = 
+--        ISNULL( ( SELECT TOP (1) MaxLsn 
+--                  FROM $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
+--                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)'
+--                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
+--    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
+--    IF NOT EXISTS (SELECT * 
+--                   FROM $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_SYNONYM)
+--                   WHERE Id = ( SELECT TOP (1) Id
+--                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)
+--                                                                    ( @BeginLsn, @BeginLsn, 'all') 
+--                                ORDER BY __$start_lsn DESC ) 
+--                   AND @LastLsn > = @MinLsn ) -- means something is missing  
+--      BEGIN
+--        INSERT $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_SYNONYM)
+--          ( Id
+--          , ServerName
+--          , MAC
+--          , Action
+--          , Status
+--          , ErrorData
+--          , CreateUTCDT
+--          , CreateUser )
+--        SELECT Id
+--             , ServerName
+--             , MAC
+--             , Action
+--             , Status
+--             , ErrorData
+--             , CreateUTCDT
+--             , CreateUser 
+--        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)
+--                                                        ( @MinLsn, @MaxLsn, 'all'); 
+--        SET @RowCount = @@ROWCOUNT;
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , [RowCount]
+--          , MAC
+--          , Action
+--          , Status )
+--        SELECT  @Id
+--               , @CaptureInstance
+--               , @BeginLsn
+--               , @MaxLsn
+--               , @RowCount  
+--               , @MAC
+--               , OBJECT_NAME(@@PROCID)
+--               , 'Complete'
+--        FROM cdc.change_tables
+--        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(NAMEVALUE_ACTIVITY_TABLE)');
+--      END
+--    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)');
+--    SET @LastLsn = 
+--        ISNULL( ( SELECT TOP (1) MaxLsn 
+--                  FROM $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
+--                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE)'
+--                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
+--    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
+--    IF NOT EXISTS (SELECT * 
+--                   FROM $(EHA_SCHEMA).$(SPOKE_ACTIVITY_SYNONYM)
+--                   WHERE Id = ( SELECT TOP (1) Id
+--                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE)
+--                                                                    ( @BeginLsn, @BeginLsn, 'all') 
+--                                ORDER BY __$start_lsn DESC ) 
+--                   AND @LastLsn > = @MinLsn ) -- means something is missing  
+--      BEGIN
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_SYNONYM)
+--          ( Id
+--          , ServerName
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , MAC
+--          , [RowCount]
+--          , Action
+--          , Status
+--          , ErrorData
+--          , CreateUTCDT
+--          , CreateUser)
+--        SELECT Id
+--             , ServerName
+--             , CaptureInstance
+--             , MinLsn
+--             , MaxLsn
+--             , MAC
+--             , [RowCount]
+--             , Action
+--             , Status
+--             , ErrorData
+--             , CreateUTCDT
+--             , CreateUser 
+--        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE) 
+--                                                     ( @BeginLsn, @MaxLsn, 'all'); 
+--        SET @RowCount = @@ROWCOUNT;
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , [RowCount]
+--          , MAC
+--          , Action
+--          , Status )
+--        SELECT  @Id
+--               , @CaptureInstance
+--               , @BeginLsn
+--               , @MaxLsn
+--               , @RowCount  
+--               , @MAC
+--               , OBJECT_NAME(@@PROCID)
+--               , 'Complete'
+--        FROM cdc.change_tables
+--        WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA)_$(SPOKE_ACTIVITY_TABLE)');
+--      END
+--    SET @Minlsn = sys.fn_cdc_get_min_lsn('$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)');
+--    SET @LastLsn = 
+--        ISNULL( ( SELECT TOP (1) MaxLsn 
+--                  FROM $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)
+--                  WHERE CaptureInstance = '$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)'
+--                  ORDER BY CreateUTCDT DESC ), 0x000000000000000000 );
+--    SET @BeginLsn = sys.fn_cdc_increment_lsn(@LastLsn)
+--    IF NOT EXISTS (SELECT * 
+--                   FROM $(EHA_SCHEMA).$(REPORT_ACTIVITY_SYNONYM)
+--                   WHERE Id = ( SELECT TOP (1) Id
+--                                FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE)
+--                                                                    ( @BeginLsn, @BeginLsn, 'all') 
+--                                ORDER BY __$start_lsn DESC ) 
+--                   AND @LastLsn > = @MinLsn ) -- means something is missing  
+--      BEGIN
+--        INSERT $(EHA_SCHEMA).$(REPORT_ACTIVITY_SYNONYM)
+--          ( Id
+--          , ServerName
+--          , ReportProcedure
+--          , Duration_ms
+--          , RowsReturned
+--          , MAC
+--          , Status
+--          , ErrorData
+--          , CreateUTCDT
+--          , CreateUser )
+--        SELECT Id
+--             , ServerName
+--             , ReportProcedure
+--             , Duration_ms
+--             , RowsReturned
+--             , MAC
+--             , Status
+--             , ErrorData
+--             , CreateUTCDT
+--             , CreateUser 
+--        FROM cdc.fn_cdc_get_all_changes_$(EHA_SCHEMA)_$(REPORT_ACTIVITY_TABLE) 
+--                                                   ( @BeginLsn, @MaxLsn, 'all'); 
+--        SET @RowCount = @@ROWCOUNT;
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , [RowCount]
+--          , MAC
+--          , Action
+--          , Status )
+--        SELECT @Id
+--             , capture_instance
+--             , @MinLsn
+--             , @MaxLsn
+--             , @RowCount  
+--             , @MAC
+--             , OBJECT_NAME(@@PROCID)
+--             , 'Complete'
+--         FROM cdc.change_tables
+--         WHERE source_object_id = OBJECT_ID('$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)');
+--      END
+--  END TRY
+--  BEGIN CATCH
+--    IF @Id IS NULL
+--      THROW;
+--    ELSE
+--      BEGIN
+--        OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
+--        DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
+--        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
+--          ( Id
+--          , CaptureInstance
+--          , MinLsn
+--          , MaxLsn
+--          , [RowCount]
+--          , MAC
+--          , Action
+--          , Status 
+--          , ErrorData )
+--        SELECT @Id
+--             , ISNULL( @CaptureInstance, CAST(NEWID() AS NVARCHAR(128) ) )
+--             , ISNULL( @BeginLsn, 0x )
+--             , ISNULL( @MaxLsn, 0x )  
+--             , ISNULL( @MAC, 0x )
+--             , ISNULL( @RowCount, 0 )
+--             , OBJECT_NAME(@@PROCID)
+--             , 'Error'
+--             , ENCRYPTBYKEY( KEY_GUID('$(ERROR_SYMMETRIC_KEY)')
+--                           , ErrorInfo 
+--                           , 1
+--                           , @Id )
+--        FROM (SELECT FORMATMESSAGE( $(MESSAGE_OFFSET)02
+--                                  , ERROR_NUMBER()
+--                                  , ERROR_SEVERITY()
+--                                  , ERROR_STATE()
+--                                  , ISNULL(ERROR_PROCEDURE(), 'ad hoc')
+--                                  , ERROR_LINE()
+--                                  , ERROR_MESSAGE() ) AS ErrorInfo ) AS derived;
+--        CLOSE ALL SYMMETRIC KEYS;
+--      END
+--  END CATCH
+--END
+--GO
+--ADD SIGNATURE TO $(EHA_SCHEMA).PushTrackedChanges
+--BY CERTIFICATE $(OBJECT_CERTIFICATE)
+--WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
+GO
+
+IF OBJECT_ID ('$(EHA_SCHEMA).RecallBackup') IS NOT NULL
+   DROP PROCEDURE $(EHA_SCHEMA).RecallBackup
 GO
 -------------------------------------------------------------------------------
 --  bwunder at yahoo dot com
---  Desc: copy the truecrypt Containers from offsite store into the database
+--  Desc: copy the key or key pair backups from hub to the restore filetable
 --        eha.Restore FileTable space
 -------------------------------------------------------------------------------
-CREATE PROCEDURE $(EHA_SCHEMA).RecallContainer
+CREATE PROCEDURE $(EHA_SCHEMA).RecallBackup
   ( @RecallId NCHAR(36) )-- if null download but do not restore
 $(WITH_OPTIONS)
 AS
 BEGIN
 DECLARE @ErrorData VARBINARY(8000)
       , @Id NCHAR(36)
-      , @FileName NVARCHAR(128) 
-      , @FilePath VARBINARY(8000)  
+      , @BackupName NVARCHAR(128) 
+      , @BackupPath VARBINARY(8000)  
       , @MAC VARBINARY(128)
-      , @Parameters VARBINARY (8000)
+      , @Parameters VARBINARY (8000) = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
+                                                   , FORMATMESSAGE( '@RecallId = %s', @RecallId)
+                                                   , 1
+                                                   , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) )
       , @RowCount INT
       , @SourceServer NVARCHAR(128)
       , @StartDT DATETIME2 = SYSUTCDATETIME();
 SET NOCOUNT ON;
   BEGIN TRY
-    SET @Parameters = ENCRYPTBYKEY( Key_GUID('$(AUDIT_SYMMETRIC_KEY)')
-                                  , FORMATMESSAGE( '@Id = ''%s'', @FileName = ''%s'''
-                                                 , @Id, @FileName )
-                                  , 1
-                                  , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) );
     CLOSE SYMMETRIC KEY [$(AUDIT_SYMMETRIC_KEY)];
     EXEC $(EHA_SCHEMA).Book @@PROCID
                           , @Parameters
@@ -6987,58 +6708,48 @@ SET NOCOUNT ON;
                                                          , Status ) AS NVARCHAR(128) )
                                           , @MAC ) = 1 ) 
       RAISERROR($(MESSAGE_OFFSET)34,16,1,@@PROCID,@Id);
-    -- validate the synonym before using it, can't sign it so hardcode at create
-    -- the ODBC DSN and user definition could still be changed
-    -- BIG man-in-the-middle hole
+    -- cannot object sign a synonym so definition is captured at install 
+    -- used here for hard value compare validation 
+    -- this can be spoofed by somoeone with knowledge of the code
     IF NOT EXISTS ( SELECT * 
                     FROM sys.synonyms syn
                     CROSS JOIN sys.servers ser  
-                    WHERE syn.name =  '$(LINK_CONTAINERS_SYNONYM)'
+                    WHERE syn.name =  '$(BACKUPS_SYNONYM)'
                     AND syn.schema_id = SCHEMA_ID( '$(EHA_SCHEMA)' )
                     AND syn.base_object_name = 
-      '[$(LINK_SERVER)].[$(LINK_EHDB)].[$(EHA_SCHEMA)].[$(CONTAINERS_TABLE)]'
-                    AND ser.Name = '$(LINK_SERVER)'
-                    AND ser.data_source = '$(LINK_SERVER_ODBC_DSN)' ) 
-      RAISERROR($(MESSAGE_OFFSET)35,16,1,'$(LINK_CONTAINERS_SYNONYM)','not found');
-    INSERT $(EHA_SCHEMA).$(RESTORE_FILETABLE) 
-      ( stream_id, file_stream, name)
-    SELECT @Id, FileImage, FORMATMESSAGE('%s_%s',ServerName, Tag) 
-    FROM $(EHA_SCHEMA).$(LINK_CONTAINERS_SYNONYM)
+'[$(HUB_LINKED_SERVER_NAME)].[$(HUB_DATABASE)].[$(EHA_SCHEMA)].[$(BACKUPS_TABLE)]'
+                    AND ser.Name = '$(HUB_LINKED_SERVER_NAME)'
+                    AND ser.data_source = '$(HUB_DATASOURCE)' ) 
+      RAISERROR($(MESSAGE_OFFSET)35,16,1,'$(BACKUPS_SYNONYM)','not found');
+    INSERT $(EHA_SCHEMA).$(RESTORES_FILETABLE) 
+      ( stream_id, file_stream )
+    SELECT Id, Export 
+    FROM $(EHA_SCHEMA).$(BACKUPS_SYNONYM)
     WHERE Id = @RecallId
     AND VerifySignedByCert( CERT_ID('$(OBJECT_CERTIFICATE)')
-                          , CAST( FileImage AS VARBINARY(8000) )
+                          , Export
                           , Signature ) = 1
     IF @@ROWCOUNT <> 1 
-      RAISERROR($(MESSAGE_OFFSET)35,16,1,'remote container','not verified');
-      SELECT @SourceServer = ServerName
-        , @FileName = CAST( DECRYPTBYKEY( FileName
-                                        , 1
-                                        , CAST(Id AS NCHAR(36) ) ) AS NVARCHAR(128) )
-        , @FilePath = FilePath
-    FROM $(EHA_SCHEMA).$(LINK_CONTAINER_ACTIVITY_SYNONYM)
+      RAISERROR($(MESSAGE_OFFSET)35,16,1,'remote store','not verified');
+    SELECT @SourceServer = ServerName
+         , @BackupName = CAST( DECRYPTBYKEY( BackupName
+                                         , 1
+                                         , CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(128) )
+         , @BackupPath = BackupPath
+    FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_SYNONYM)
     WHERE Id = @RecallId;
-    INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
+    INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
       ( Id
       , ServerName
-      , FileName
-      , FilePath
-      , SizeInBytes
       , MAC
       , Action
       , Status )
-    SELECT @Id
-         , @SourceServer
-         , ENCRYPTBYKEY( KEY_GUID( '$(FILE_SYMMETRIC_KEY)' )
-                       , @FileName
-                       , 1
-                       , @Id )
-         , @FilePath
-         , LEN(FileImage)
-         , @MAC
-         , OBJECT_NAME(@@PROCID)
-         , 'Complete'
-     FROM $(EHA_SCHEMA).$(CONTAINERS_TABLE)
-     WHERE Id = @RecallId;
+    VALUES 
+      ( @Id
+      , @SourceServer
+      , @MAC
+      , OBJECT_NAME(@@PROCID)
+      , 'Complete' )
     CLOSE ALL SYMMETRIC KEYS;
   END TRY
   BEGIN CATCH
@@ -7048,19 +6759,13 @@ SET NOCOUNT ON;
       BEGIN
         OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
         DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
-        INSERT $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) 
+        INSERT $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) 
           ( Id
-          , FileName
-          , FilePath
-          , SizeInBytes
           , MAC
           , Action
           , Status 
           , ErrorData )
         SELECT @Id
-              , ISNULL ( ENCRYPTBYKEY(KEY_GUID('$(FILE_SYMMETRIC_KEY)'), @FileName, 1, @Id ), 0x0 )
-              , ISNULL ( @FilePath, 0x0 )
-              , 0
               , ISNULL ( @MAC, 0x0 )
               , OBJECT_NAME(@@PROCID)
               , 'Error'
@@ -7080,7 +6785,7 @@ SET NOCOUNT ON;
   END CATCH
 END
 GO
-ADD SIGNATURE TO $(EHA_SCHEMA).RecallContainer
+ADD SIGNATURE TO $(EHA_SCHEMA).RecallBackup
 BY CERTIFICATE $(OBJECT_CERTIFICATE)
 WITH PASSWORD = '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)';
 GO
@@ -7454,18 +7159,6 @@ DECLARE @Id NCHAR(36)
     AND ServerName = @ServerName
     UNION ALL
     SELECT  ServerName 
-          , '$(CONTAINER_ACTIVITY_TABLE)'
-          , DB_NAME()
-	        , FORMATMESSAGE( '%s_%s', Action, DECRYPTBYKEY( FileName, 1, CAST( Id AS NCHAR(36) ) ) )
-	        , Status
-          , CreateUTCDT 
-          , CreateUser 
-          , CAST( DECRYPTBYKEY( ErrorData, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(4000) ) AS ErrorData 
-    FROM eha.$(CONTAINER_ACTIVITY_TABLE)     
-    WHERE Status = 'Error'
-    AND ServerName = @ServerName
-    UNION ALL
-    SELECT  ServerName 
           , '$(NAMEVALUE_ACTIVITY_TABLE)'  
           , DB_NAME()
 	        , Action
@@ -7478,14 +7171,14 @@ DECLARE @Id NCHAR(36)
     AND ServerName = @ServerName
     UNION ALL
     SELECT  ServerName 
-          , '$(OFFSITE_ACTIVITY_TABLE)'
+          , '$(SPOKE_ACTIVITY_TABLE)'
           , DB_NAME()
-	        , CaptureInstance
+          , Action
 	        , Status
           , CreateUTCDT 
           , CreateUser 
           , CAST( DECRYPTBYKEY( ErrorData, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(4000) ) AS ErrorData 
-    FROM eha.$(OFFSITE_ACTIVITY_TABLE)     
+    FROM eha.$(SPOKE_ACTIVITY_TABLE)     
     WHERE Status = 'Error'
     AND ServerName = @ServerName
     UNION ALL
@@ -7631,39 +7324,32 @@ DECLARE @ErrorData VARBINARY(8000)
     FROM (SELECT CAST( b.Id AS NCHAR(36) ) AS Id
                , COALESCE( ba.NodeName
                          , ra.ReportProcedure
-                         , oa.CaptureInstance
-                         , c.Tag
                          , DECRYPTBYKEY(nv.Name ,1,CAST(nv.Id AS NCHAR(36) ) )
                          , '' ) AS Name
                , CASE WHEN nva.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE)'
                       WHEN ba.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE)'
-                      WHEN ca.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE)' 
                       WHEN na.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)' 
-                      WHEN oa.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE)' 
+                      WHEN oa.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)' 
                       WHEN ra.Id IS NOT NULL THEN '$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)' 
                       END AS [Category] 
                , b.ObjectName AS Action
                , b.Status AS BookingStatus
-               , COALESCE(ba.Status, nva.Status, ca.Status, ra.Status, oa.Status) AS ActionStatus
-               , COALESCE( b.ErrorData, ba.ErrorData, nva.ErrorData, ca.ErrorData, oa.ErrorData, ra.ErrorData) AS ErrorData
+               , COALESCE(ba.Status, nva.Status, ra.Status, oa.Status) AS ActionStatus
+               , COALESCE( b.ErrorData, ba.ErrorData, nva.ErrorData, oa.ErrorData, ra.ErrorData) AS ErrorData
                , ISNULL( ba.CipherType, '' ) AS CipherType
                , b.CreateUTCDT AS BookingUTCDT
-               , COALESCE(ba.CreateUTCDT, nva.CreateUTCDT, ca.CreateUTCDT, oa.CreateUTCDT, ra.CreateUTCDT) AS LogUTCDT 
-               , COALESCE(ba.CreateUser, nva.CreateUser, ca.CreateUser, oa.CreateUser, ra.CreateUser) AS CreateUser 
+               , COALESCE(ba.CreateUTCDT, nva.CreateUTCDT, oa.CreateUTCDT, ra.CreateUTCDT) AS LogUTCDT 
+               , COALESCE(ba.CreateUser, nva.CreateUser, oa.CreateUser, ra.CreateUser) AS CreateUser 
           FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) b
           LEFT JOIN $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) ba
           ON b.Id = ba.Id
-          LEFT JOIN $(EHA_SCHEMA).$(CONTAINER_ACTIVITY_TABLE) ca
-          ON b.Id = ca.Id
-          LEFT JOIN $(EHA_SCHEMA).$(CONTAINERS_TABLE) c
-          ON ca.Id = c.Id
           LEFT JOIN $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) nva
           ON b.Id = nva.Id
           LEFT JOIN $(EHA_SCHEMA).$(NAMEVALUEs_TABLE) nv
           ON nva.Id = nv.Id
           LEFT JOIN $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE) na
           ON b.Id = na.Id 
-          LEFT JOIN $(EHA_SCHEMA).$(OFFSITE_ACTIVITY_TABLE) oa
+          LEFT JOIN $(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE) oa
           ON b.Id = oa.Id 
           LEFT JOIN $(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE) ra
           ON b.Id = ra.Id ) AS derived;
@@ -7728,7 +7414,7 @@ GO
 -- Start DDL trigger data access monitoring 
 -------------------------------------------------------------------------------
 -- Prevent all - including sysadmin and dbo - that are not members of  
--- $(EHADMIN_ROLE) role from changing the designated EHAdmin db 
+-- $(SPOKE_ADMIN_ROLE) role from changing the designated EHAdmin db 
 -- any sysadmin that understands how it all works will be able
 -- to disable the trigger - and if they plan to come back without being 
 -- noticed may even re-enable it when done to cover tracks. 
@@ -7740,11 +7426,11 @@ GO
 -- re-enable if unauthorized DISABLE TRIGGER before storing as cipher-text  
 -------------------------------------------------------------------------------
 IF EXISTS (SELECT * FROM sys.triggers
-           WHERE name = 'trg_ddl_$(EHDB)' )
-  DROP TRIGGER trg_ddl_$(EHDB) ON DATABASE;
+           WHERE name = 'trg_ddl_$(SPOKE_DATABASE)' )
+  DROP TRIGGER trg_ddl_$(SPOKE_DATABASE) ON DATABASE;
 
 GO
-CREATE TRIGGER trg_ddl_$(EHDB)
+CREATE TRIGGER trg_ddl_$(SPOKE_DATABASE)
 ON DATABASE 
 WITH ENCRYPTION, EXECUTE AS SELF
 FOR DDL_DATABASE_LEVEL_EVENTS 
@@ -7759,7 +7445,7 @@ DECLARE @LogRecord NVARCHAR(2048);
                           CROSS APPLY change.nodes('/EVENT_INSTANCE') AS ddl(event) ) q
                     JOIN sys.database_role_members r
                     ON q.LoginName = USER_NAME(r.member_principal_id)
-                    WHERE r.role_principal_id = USER_ID('$(EHADMIN_ROLE)') )
+                    WHERE r.role_principal_id = USER_ID('$(SPOKE_ADMIN_ROLE)') )
     AND USER_NAME() <> 'cdc'
       BEGIN
         SET @LogRecord = FORMATMESSAGE( '%2048.2048s' 
@@ -7778,10 +7464,10 @@ DECLARE @LogRecord NVARCHAR(2048);
 END
 GO
 IF EXISTS (SELECT * FROM sys.triggers
-           WHERE name = 'trg_trg_$(EHDB)' )
-  DROP TRIGGER trg_trg_$(EHDB) ON DATABASE;
+           WHERE name = 'trg_trg_$(SPOKE_DATABASE)' )
+  DROP TRIGGER trg_trg_$(SPOKE_DATABASE) ON DATABASE;
 GO
-CREATE TRIGGER trg_trg_$(EHDB)
+CREATE TRIGGER trg_trg_$(SPOKE_DATABASE)
 ON DATABASE 
 WITH ENCRYPTION, EXECUTE AS SELF
 FOR DDL_TRIGGER_EVENTS 
@@ -7796,7 +7482,7 @@ DECLARE @LogRecord NVARCHAR(2048);
                           CROSS APPLY change.nodes('/EVENT_INSTANCE') AS ddl(event) ) q
                     JOIN sys.database_role_members r
                     ON q.LoginName = USER_NAME(r.member_principal_id)
-                    WHERE r.role_principal_id = USER_ID('$(EHADMIN_ROLE)') )
+                    WHERE r.role_principal_id = USER_ID('$(SPOKE_ADMIN_ROLE)') )
     AND USER_NAME() <> 'cdc'
       BEGIN
         SET @LogRecord = FORMATMESSAGE( '%2048.2048s' 
@@ -7814,38 +7500,39 @@ DECLARE @LogRecord NVARCHAR(2048);
   END CATCH
 END
 GO
----- If the values provided are incorrect or objects are added/removed nothing 
----- will work if this is not valid at install 
----- synonyms cannot be signed, filetable cannot 
---SELECT 'OBJECT_COUNT', $(OBJECT_COUNT)
---UNION ALL
---SELECT 'TABLE_COUNT', $(TABLE_COUNT)
---UNION ALL
---SELECT 'DDL_TRIGGERS', COUNT(*)
---FROM sys.triggers
---WHERE parent_id = 0
---UNION ALL
---SELECT 'DML_TRIGGERS', COUNT(*)
---FROM sys.triggers
---WHERE OBJECT_SCHEMA_NAME(parent_id)  = 'eha'
---UNION ALL
---SELECT 'UNSIGNED_SYNONYMS', COUNT(*) 
---FROM sys.synonyms
---WHERE OBJECT_SCHEMA_NAME (object_id) = 'eha'
---UNION ALL
---SELECT s.type, COUNT(*)
---FROM sys.certificates c
---OUTER APPLY sys.fn_check_object_signatures ( 'CERTIFICATE', c.thumbprint ) s
---WHERE c.name = '$(OBJECT_CERTIFICATE)'
---AND c.pvt_key_encryption_type = 'PW'
---AND OBJECT_SCHEMA_NAME (s.entity_id) = 'eha'
---AND is_signature_valid = 1	
---GROUP BY s.type;
+-- if OBJECT_COUNT and DELTA values provided are incorrect (objects are added/removed) 
+-- used as part of run-time schema validation/sanity check
+-- nothing will work if counts change & these values are not updated before installing
+SELECT ISNULL(obj.type, sig.type) AS ObjectType
+     , ISNULL(obj.ObjectCount, 0) AS ObjectCount
+     , ISNULL(sig.SignedCount, 0) AS SignedCount 
+     , ISNULL(obj.ObjectCount, 0) - ISNULL(sig.SignedCount, 0) AS DELTA
+FROM (SELECT IIF(GROUPING(type_desc) = 1, 'OBJECT_COUNT', type_desc) AS type
+           , COUNT(*) AS [ObjectCount]
+      FROM sys.objects
+      WHERE SCHEMA_NAME(schema_id) = '$(EHA_SCHEMA)'
+      AND parent_object_id = 0
+      OR type = 'TR' 
+      GROUP BY type_desc 
+      WITH ROLLUP) as obj
+FULL OUTER JOIN 
+     (SELECT IIF(grouping(type) = 1, 'OBJECT_COUNT', s.type) AS type, COUNT(*) AS [SignedCount]
+      FROM sys.certificates c
+      CROSS APPLY sys.fn_check_object_signatures ( 'CERTIFICATE', c.thumbprint ) s
+      WHERE c.name = 'ObjectCertificate'--'$(OBJECT_CERTIFICATE)'
+      AND c.pvt_key_encryption_type = 'PW'
+      AND OBJECT_SCHEMA_NAME (s.entity_id) = '$(EHA_SCHEMA)'
+      AND s.is_signature_valid = 1	
+      GROUP BY s.type 
+      WITH ROLLUP) AS sig
+ON obj.type = sig.type;
 GO
+------------------------------------------------------------------------------------------------------
+-- first booking
 ------------------------------------------------------------------------------------------------------
 -- a SESSION_SYMMETRIC_KEY must be open before any white-listed procedure is run
 -- and every white-listed procedure ends with CLOSE ALL SYMMETRIC KEYS
--- the key is always a temp object encrypted by the   
+-- the key is always a temp object encrypted by the SESSION_SYMMETRIC_KEY   
 ------------------------------------------------------------------------------------------------------
 EXEC $(EHA_SCHEMA).OpenSession; 
 INSERT INTO $(EHA_SCHEMA).$(BOOKINGS_TABLE) 
@@ -7855,104 +7542,80 @@ INSERT INTO $(EHA_SCHEMA).$(BOOKINGS_TABLE)
   , Parameters
   , KeyGuid
   , Status )
-VALUES ( '00000000-0000-0000-0000-000000000000'
+VALUES ( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
        , 0   
        , 'InstallSpoke.sql'
        , ENCRYPTBYKEY( KEY_GUID( '$(AUDIT_SYMMETRIC_KEY)')
-                               , LEFT ( 
-N'AUDIT_CERTIFICATE "$(AUDIT_CERTIFICATE)"
-AUDIT_CERTIFICATE_ENCRYPTION_PHRASE "$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)"
-AUDIT_CERTIFICATE_BACKUP_PHRASE "$(AUDIT_CERTIFICATE_BACKUP_PHRASE)"
-AUDIT_SYMMETRIC_KEY "$(AUDIT_SYMMETRIC_KEY)"
-AUDIT_KEY_ENCRYPTION_ALGORITHM "$(AUDIT_KEY_ENCRYPTION_ALGORITHM)"
-AUTHENTICITY_CERTIFICATE "$(AUTHENTICITY_CERTIFICATE)"
-AUTHENTICITY_CERTIFICATE_BACKUP_PHRASE "$(AUTHENTICITY_CERTIFICATE_BACKUP_PHRASE)"
-CONTAINER_CERTIFICATE "$(CONTAINER_CERTIFICATE)"
-CONTAINER_CERTIFICATE_BACKUP_PHRASE "$(CONTAINER_CERTIFICATE_BACKUP_PHRASE)"
-EHDB_DMK_BACKUP_PHRASE "$(EHDB_DMK_BACKUP_PHRASE)"
-EHDB_DMK_ENCRYPTION_PHRASE "$(EHDB_DMK_ENCRYPTION_PHRASE)"
-ERROR_SYMMETRIC_KEY "$(ERROR_SYMMETRIC_KEY)"
-ERROR_KEY_ENCRYPTION_ALGORITHM "$(ERROR_KEY_ENCRYPTION_ALGORITHM)"
-ERROR_KEY_ENCRYPTION_PHRASE "$(ERROR_KEY_ENCRYPTION_PHRASE)"
-ERROR_KEY_SOURCE "$(ERROR_KEY_SOURCE)"
-ERROR_KEY_IDENTITY "$(ERROR_KEY_IDENTITY)"
-EVENT_CERTIFICATE "$(EVENT_CERTIFICATE)"
-EVENT_CERTIFICATE_BACKUP_PHRASE "$(EVENT_CERTIFICATE_BACKUP_PHRASE)"
-FILE_CERTIFICATE "$(FILE_CERTIFICATE)"
-FILE_CERTIFICATE_ENCRYPTION_PHRASE "$(FILE_CERTIFICATE_ENCRYPTION_PHRASE)"
-FILE_CERTIFICATE_BACKUP_PHRASE "$(FILE_CERTIFICATE_BACKUP_PHRASE)"
-FILE_SYMMETRIC_KEY "$(FILE_SYMMETRIC_KEY)"
-FILE_KEY_ENCRYPTION_ALGORITHM "$(FILE_KEY_ENCRYPTION_ALGORITHM)"
-HASHBYTES_ALGORITHM "$(HASHBYTES_ALGORITHM)"
-KEY_CONTAINER_PATH "$(KEY_CONTAINER_PATH)"
-KEY_CONTAINER_FILE "$(KEY_CONTAINER_FILE)"
-LINK_EHDB "$(LINK_EHDB)"
-LINK_PASSWORD "$(LINK_PASSWORD)"
-LINK_SERVER_ODBC_DSN "$(LINK_SERVER_ODBC_DSN)"
-LINK_SERVER "$(LINK_SERVER)"
-LINK_USER "$(LINK_USER)"
-master_DMK_ENCRYPTION_PHRASE "$(master_DMK_ENCRYPTION_PHRASE)"
-master_DMK_BACKUP_PHRASE "$(master_DMK_BACKUP_PHRASE)"
-MESSAGE_OFFSET "$(MESSAGE_OFFSET)"
-MIN_PHRASE_LENGTH "$(MIN_PHRASE_LENGTH)"
-NAME_CERTIFICATE "$(NAME_CERTIFICATE)"
-NAME_CERTIFICATE_ENCRYPTION_PHRASE "$(NAME_CERTIFICATE_ENCRYPTION_PHRASE)"
-NAME_CERTIFICATE_BACKUP_PHRASE "$(NAME_CERTIFICATE_BACKUP_PHRASE)"
-NAME_KEY_ENCRYPTION_ALGORITHM "$(NAME_KEY_ENCRYPTION_ALGORITHM)"
-NAME_SYMMETRIC_KEY "$(NAME_SYMMETRIC_KEY)"
-OBJECT_CERTIFICATE "$(OBJECT_CERTIFICATE)"
-OBJECT_CERTIFICATE_ENCRYPTION_PHRASE "$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)"
-OBJECT_CERTIFICATE_BACKUP_PHRASE "$(OBJECT_CERTIFICATE_BACKUP_PHRASE)"
-PRIVATE_ENCRYPTION_PHRASE "$(PRIVATE_ENCRYPTION_PHRASE)"
+                     , N'WITH_OPTIONS "$(WITH_OPTIONS)"
+WITH_OPTIONS_FOR_ACTIVATION "$(WITH_OPTIONS_FOR_ACTIVATION)"
+EXPORT_PATH "$(EXPORT_PATH)"
 SESSION_SYMMETRIC_KEY "$(SESSION_SYMMETRIC_KEY)"
 SESSION_KEY_SOURCE "$(SESSION_KEY_SOURCE)"
 SESSION_KEY_IDENTITY "$(SESSION_KEY_IDENTITY)"
-SMK_BACKUP_PHRASE "$(SMK_BACKUP_PHRASE)"
 TDE_CERTIFICATE "$(TDE_CERTIFICATE)"
 TDE_CERTIFICATE_ALGORITHM "$(TDE_CERTIFICATE_ALGORITHM)"
-TDE_CERTIFICATE_BACKUP_PHRASE "$(TDE_CERTIFICATE_BACKUP_PHRASE)"
-TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE "$(TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE)"
-TRUECRYPT_EXE "$(TRUECRYPT_EXE)"
-USE_HASH_FOR_FILENAME "$(USE_HASH_FOR_FILENAME)"
+AUDIT_CERTIFICATE "$(AUDIT_CERTIFICATE)"
+AUDIT_SYMMETRIC_KEY "$(AUDIT_SYMMETRIC_KEY)"
+AUDIT_KEY_ENCRYPTION_ALGORITHM "$(AUDIT_KEY_ENCRYPTION_ALGORITHM)"
+AUDIT_TO "$(AUDIT_TO)"
+AUTHENTICITY_CERTIFICATE "$(AUTHENTICITY_CERTIFICATE)"
+ERROR_SYMMETRIC_KEY "$(ERROR_SYMMETRIC_KEY)"
+ERROR_KEY_ENCRYPTION_ALGORITHM "$(ERROR_KEY_ENCRYPTION_ALGORITHM)"
+EVENT_CERTIFICATE "$(EVENT_CERTIFICATE)"
+FILE_CERTIFICATE "$(FILE_CERTIFICATE)"
+FILE_SYMMETRIC_KEY "$(FILE_SYMMETRIC_KEY)"
+FILE_KEY_ENCRYPTION_ALGORITHM "$(FILE_KEY_ENCRYPTION_ALGORITHM)"
+NAME_CERTIFICATE "$(NAME_CERTIFICATE)"
+NAME_SYMMETRIC_KEY "$(NAME_SYMMETRIC_KEY)"
+NAME_KEY_ENCRYPTION_ALGORITHM "$(NAME_KEY_ENCRYPTION_ALGORITHM)"
+OBJECT_CERTIFICATE "$(OBJECT_CERTIFICATE)"
 VALUE_CERTIFICATE "$(VALUE_CERTIFICATE)"
-VALUE_CERTIFICATE_BACKUP_PHRASE "$(VALUE_CERTIFICATE_BACKUP_PHRASE)"
-VALUE_KEY_ENCRYPTION_ALGORITHM "$(VALUE_KEY_ENCRYPTION_ALGORITHM)"
 VALUE_SYMMETRIC_KEY "$(VALUE_SYMMETRIC_KEY)"
-VHD_LETTER "$(VHD_LETTER)"
-
-BOOKINGS_TABLE "$(BOOKINGS_TABLE)"
-BACKUP_ACTIVITY_TABLE "$(BACKUP_ACTIVITY_TABLE)"
-CONTAINER_ACTIVITY_TABLE "$(CONTAINER_ACTIVITY_TABLE)"
-CONTAINERS_TABLE "$(EHA_SCHEMA)"
-EHA_SCHEMA "$(EHA_SCHEMA)"
-EHADMIN_ROLE "$(EHADMIN_ROLE)"
-EHDB "$(EHDB)"
-EVENT_NOTIFICATION "$(EVENT_NOTIFICATION)"
-FILESTREAM_FILEGROUP "$(FILESTREAM_FILEGROUP)"
-FILESTREAM_FILE "$(FILESTREAM_FILE)"
-FILETABLE_BACKUPS "$(FILETABLE_BACKUPS)"
-FILETABLE_DIRECTORY "$(FILETABLE_DIRECTORY)"
-LINK_BOOKINGS_SYNONYM "$(LINK_BOOKINGS_SYNONYM)"
-LINK_BACKUP_ACTIVITY_SYNONYM "$(LINK_BACKUP_ACTIVITY_SYNONYM)"
-LINK_CONTAINERS_SYNONYM "$(LINK_CONTAINERS_SYNONYM)"
-LINK_CONTAINER_ACTIVITY_SYNONYM "$(LINK_CONTAINER_ACTIVITY_SYNONYM)"
-LINK_NAMEVALUES_SYNONYM "$(LINK_NAMEVALUES_SYNONYM)"
-LINK_NAMEVALUE_ACTIVITY_SYNONYM "$(LINK_NAMEVALUE_ACTIVITY_SYNONYM)"
-LINK_NOTIFICATION_ACTIVITY_SYNONYM "$(LINK_NOTIFICATION_ACTIVITY_SYNONYM)"
-LINK_OFFSITE_ACTIVITY_SYNONYM "$(LINK_OFFSITE_ACTIVITY_SYNONYM)"
-LINK_REPORT_ACTIVITY_SYNONYM "$(LINK_REPORT_ACTIVITY_SYNONYM)"
-MASTER_KEY_BACKUP_EXT "$(MASTER_KEY_BACKUP_EXT)"
-NAMEVALUE_ACTIVITY_TABLE "$(NAMEVALUE_ACTIVITY_TABLE)"
-NAMEVALUES_TABLE "$(NAMEVALUES_TABLE)"
-NOTIFICATION_ACTIVITY_TABLE "$(NOTIFICATION_ACTIVITY_TABLE)"
+VALUE_KEY_ENCRYPTION_ALGORITHM "$(VALUE_KEY_ENCRYPTION_ALGORITHM)"
+HASHBYTES_ALGORITHM "$(HASHBYTES_ALGORITHM)"
+MESSAGE_OFFSET "$(MESSAGE_OFFSET)"
+MIN_PHRASE_LENGTH "$(MIN_PHRASE_LENGTH)"
 OBJECT_COUNT "$(OBJECT_COUNT)"
-OFFSITE_ACTIVITY_TABLE "$(OFFSITE_ACTIVITY_TABLE)"
+DELTA "$(DELTA)"
+MAX_TRACE_COUNT "$(MAX_TRACE_COUNT)"
+USE_HASH_FOR_FILENAME "$(USE_HASH_FOR_FILENAME)"
+EVENT_NOTIFICATION "$(EVENT_NOTIFICATION)"
+TIMER_TIMEOUT "$(TIMER_TIMEOUT)"
+HUB_DATASOURCE "$(HUB_DATASOURCE)"
+HUB_SERVER_NAME "$(HUB_SERVER_NAME)"
+HUB_LINKED_SERVER_NAME "$(HUB_LINKED_SERVER_NAME)"
+BOOKINGS_SYNONYM "$(BOOKINGS_SYNONYM)"
+BACKUPS_SYNONYM "$(BACKUPS_SYNONYM)"
+BACKUP_ACTIVITY_SYNONYM "$(BACKUP_ACTIVITY_SYNONYM)"
+HUB_ACTIVITY_SYNONYM "$(HUB_ACTIVITY_SYNONYM)"
+NAMEVALUES_SYNONYM "$(NAMEVALUES_SYNONYM)"
+NAMEVALUE_ACTIVITY_SYNONYM "$(NAMEVALUE_ACTIVITY_SYNONYM)"
+NOTIFICATION_ACTIVITY_SYNONYM "$(NOTIFICATION_ACTIVITY_SYNONYM)"
+SPOKE_ACTIVITY_SYNONYM "$(SPOKE_ACTIVITY_SYNONYM)"
+REPORT_ACTIVITY_SYNONYM "$(REPORT_ACTIVITY_SYNONYM)"
+MASTER_KEY_BACKUP_EXT "$(MASTER_KEY_BACKUP_EXT)"
 PRIVATE_KEY_BACKUP_EXT "$(PRIVATE_KEY_BACKUP_EXT)"
 PUBLIC_KEY_BACKUP_EXT "$(PUBLIC_KEY_BACKUP_EXT)"
+SPOKE_ADMIN "$(SPOKE_ADMIN)"
+SPOKE_BROKER "$(SPOKE_BROKER)"
+SPOKE_DATABASE v$(SPOKE_DATABASE)"
+HUB_DATABASE "$(HUB_DATABASE)"
+EHA_SCHEMA "$(EHA_SCHEMA)"
+HUB_ADMIN_ROLE "$(HUB_ADMIN_ROLE)"
+SPOKE_ADMIN_ROLE "$(SPOKE_ADMIN_ROLE)"
+SPOKE_BROKER_ROLE "$(SPOKE_BROKER_ROLE)"
+BOOKINGS_TABLE "$(BOOKINGS_TABLE)"
+BACKUPS_TABLE "$(BACKUPS_TABLE)"
+BACKUP_ACTIVITY_TABLE "$(BACKUP_ACTIVITY_TABLE)"
+HUB_ACTIVITY_TABLE "$(HUB_ACTIVITY_TABLE)"
+NAMEVALUES_TABLE "$(NAMEVALUES_TABLE)"
+NAMEVALUE_ACTIVITY_TABLE "$(NAMEVALUE_ACTIVITY_TABLE)"
+NOTIFICATION_ACTIVITY_TABLE "$(NOTIFICATION_ACTIVITY_TABLE)"
+SPOKE_ACTIVITY_TABLE "$(SPOKE_ACTIVITY_TABLE)"
 REPORT_ACTIVITY_TABLE "$(REPORT_ACTIVITY_TABLE)"
-RESTORE_FILETABLE "$(RESTORE_FILETABLE)"
-TABLE_COUNT "$(TABLE_COUNT)"'
-                                      , 4000 )
+FILESTREAM_FILEGROUP "$(FILESTREAM_FILEGROUP)"
+FILESTREAM_FILE "$(FILESTREAM_FILE)"
+FILETABLE_DIRECTORY "$(FILETABLE_DIRECTORY)"'
                                , 1  
                                , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) ) )
        , CAST( KEY_GUID('$(SESSION_SYMMETRIC_KEY)') AS NCHAR(36) )
@@ -8001,31 +7664,30 @@ SELECT  Id
       , 'Complete'
       , '' AS CipherType 
 FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE)
-WHERE Id = '00000000-0000-0000-0000-000000000000'; 
+WHERE Id = KEY_GUID('$(SESSION_SYMMETRIC_KEY)'); 
 CLOSE ALL SYMMETRIC KEYS;
 GO
 -- generate and the salt seed for all hash columns and save in NAMEVALUE_TABLE
 EXEC $(EHA_SCHEMA).OpenSession;
-EXEC $(EHA_SCHEMA).MakeSalt '$(EHDB)', '$(EHA_SCHEMA)', '$(BACKUP_ACTIVITY_TABLE)', 'BackupNameBucket';
+EXEC $(EHA_SCHEMA).MakeSalt '$(SPOKE_DATABASE)', '$(EHA_SCHEMA)', '$(BACKUP_ACTIVITY_TABLE)', 'BackupNameBucket';
 GO
 EXEC $(EHA_SCHEMA).OpenSession;
-EXEC $(EHA_SCHEMA).MakeSalt '$(EHDB)', '$(EHA_SCHEMA)', '$(BACKUP_ACTIVITY_TABLE)', 'Colophon';
+EXEC $(EHA_SCHEMA).MakeSalt '$(SPOKE_DATABASE)', '$(EHA_SCHEMA)', '$(BACKUP_ACTIVITY_TABLE)', 'Colophon';
 GO
 EXEC $(EHA_SCHEMA).OpenSession;
-EXEC $(EHA_SCHEMA).MakeSalt '$(EHDB)', '$(EHA_SCHEMA)', '$(NAMEVALUES_TABLE)', 'NameBucket';
+EXEC $(EHA_SCHEMA).MakeSalt '$(SPOKE_DATABASE)', '$(EHA_SCHEMA)', '$(NAMEVALUES_TABLE)', 'NameBucket';
 GO
 EXEC $(EHA_SCHEMA).OpenSession;
-EXEC $(EHA_SCHEMA).MakeSalt '$(EHDB)', '$(EHA_SCHEMA)', '$(NAMEVALUES_TABLE)', 'ValueBucket';
+EXEC $(EHA_SCHEMA).MakeSalt '$(SPOKE_DATABASE)', '$(EHA_SCHEMA)', '$(NAMEVALUES_TABLE)', 'ValueBucket';
 GO
--- initialize the container, image and offsite with keys and certificates created by this script
+------------------------------------------------------------------------------------------------------
+-- local backups of cryptographic objects created by script, push changes to hub, offload backups
 ------------------------------------------------------------------------------------------------------
 -- SQL Trace "assignment obfuscation" is ineffective for call stored procedures and sp_executesql 
 -- SP:Starting of the crypto-objects backups will reveal the secrets 
---http://blogs.msdn.com/b/sqlsecurity/archive/2009/06/10/filtering-obfuscating-sensitive-text-in-sql-server.aspx
--- a temp session symmetric key is used to encrypt before passing - this relies upon crypto-DDL obfuscation
--- the key goes away forever when the user closes the install script's SQL Server connection
--- interesting thing about the temp key is it serializes white-listed procedures due to a key name
--- in use or you do not have permission exception.  
+-- blogs.msdn.com/b/sqlsecurity/archive/2009/06/10/filtering-obfuscating-sensitive-text-in-sql-server.aspx
+-- a temp session symmetric key is used to encrypt before passing. This relies upon crypto-DDL 
+-- obfuscation. The temp key goes away when user closes the SQL Server connection.   
 ------------------------------------------------------------------------------------------------------
 DECLARE @BackupPhrase AS VARBINARY(8000); 
 DECLARE @KeyPhrase AS VARBINARY(8000); 
@@ -8050,7 +7712,7 @@ SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(EHDB_DMK_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 SET @KeyPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(EHDB_DMK_ENCRYPTION_PHRASE)' AS NVARCHAR(128) ) ) );
-EXEC $(EHA_SCHEMA).BackupDatabaseMasterKey @DbName = N'$(EHDB)'
+EXEC $(EHA_SCHEMA).BackupDatabaseMasterKey @DbName = N'$(SPOKE_DATABASE)'
                                          , @BackupPhrase = @BackupPhrase
                                          , @KeyPhrase = @KeyPhrase
                                          , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8073,7 +7735,7 @@ EXEC $(EHA_SCHEMA).OpenSession;
 SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(NAME_CERTIFICATE_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @CertificateName = N'$(NAME_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = DEFAULT
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8082,7 +7744,7 @@ EXEC $(EHA_SCHEMA).OpenSession;
 SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(VALUE_CERTIFICATE_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @CertificateName = N'$(VALUE_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = DEFAULT
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8091,7 +7753,7 @@ EXEC $(EHA_SCHEMA).OpenSession;
 SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(FILE_CERTIFICATE_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @CertificateName = N'$(FILE_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = DEFAULT
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8100,7 +7762,7 @@ EXEC $(EHA_SCHEMA).OpenSession;
 SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(AUTHENTICITY_CERTIFICATE_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @Certificatename = N'$(AUTHENTICITY_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = DEFAULT
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8111,7 +7773,7 @@ SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
 SET @KeyPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(AUDIT_CERTIFICATE_ENCRYPTION_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @CertificateName = N'$(AUDIT_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = @KeyPhrase
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8120,7 +7782,7 @@ EXEC $(EHA_SCHEMA).OpenSession;
 SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(EVENT_CERTIFICATE_BACKUP_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @Certificatename = N'$(EVENT_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = DEFAULT
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8131,7 +7793,7 @@ SET @BackupPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
 SET @KeyPhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                         ,  CAST( '$(OBJECT_CERTIFICATE_ENCRYPTION_PHRASE)' AS NVARCHAR(128) ) ) );
 EXEC $(EHA_SCHEMA).BackupCertificate @CertificateName = N'$(OBJECT_CERTIFICATE)'
-                                   , @DbName = N'$(EHDB)'
+                                   , @DbName = N'$(SPOKE_DATABASE)'
                                    , @BackupPhrase = @BackupPhrase
                                    , @KeyPhrase = @KeyPhrase
                                    , @UseHash = $(USE_HASH_FOR_FILENAME)
@@ -8147,51 +7809,33 @@ SET @KeyIdentity = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                        ,  CAST( '$(ERROR_KEY_IDENTITY)' AS NVARCHAR(128) ) ) );
 SET @KeySource = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                      ,  CAST( '$(ERROR_KEY_SOURCE)' AS NVARCHAR(128) ) ) );
-EXEC $(EHA_SCHEMA).SavePortableSymmetricKey @KeyName = '$(ERROR_SYMMETRIC_KEY)'
+EXEC $(EHA_SCHEMA).AddPortableSymmetricKey @KeyName = '$(ERROR_SYMMETRIC_KEY)'
                                           , @KeyIdentity = @KeyIdentity
                                           , @KeySource = @KeySource;
+-- redundant because SQL Server encrypts any cached linked server passwords  - but that one cannot be recalled 
 EXEC $(EHA_SCHEMA).OpenSession;
 SET @PrivatePhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                          ,  CAST( '$(PRIVATE_ENCRYPTION_PHRASE)' AS NVARCHAR(128) ) ) );
 SET @Value = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
-                                 ,  CAST( '$(LINK_PASSWORD)' AS NVARCHAR(128) ) ) );
-EXEC $(EHA_SCHEMA).SavePrivateValue @Name = 'LINK_PASSWORD'
+                                 ,  CAST( '$(SPOKE_ADMIN_PASSWORD)' AS NVARCHAR(128) ) ) );
+EXEC $(EHA_SCHEMA).AddPrivateValue @Name = 'SPOKE_ADMIN_PASSWORD'
                                   , @Value = @Value
                                   , @EncryptionPhrase = @PrivatePhrase
                                   , @AuditPrivateData = DEFAULT;
--- already have @PrivatePhrase
 EXEC $(EHA_SCHEMA).OpenSession;
+-- already have @PrivatePhrase 
 SET @Value = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
-                                 ,  CAST( '$(TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE)' AS NVARCHAR(128) ) ) );
-EXEC $(EHA_SCHEMA).SavePrivateValue @Name = 'TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE'
+                                 ,  CAST( '$(SPOKE_BROKER_PASSWORD)' AS NVARCHAR(128) ) ) );
+EXEC $(EHA_SCHEMA).AddPrivateValue @Name = 'SPOKE_BROKER_PASSWORD'
                                   , @Value = @Value
                                   , @EncryptionPhrase = @PrivatePhrase
                                   , @AuditPrivateData = DEFAULT;
-GO
--- dismount and backup Truecrypt container file
-:!!if exist $(VHD_LETTER):\ "$(TRUECRYPT_EXE)" /q /s /d X /f)\
---:!!if exist $(FILETABLE_MAPPED_DRIVE_LETTER):\ net use $(FILETABLE_MAPPED_DRIVE_LETTER): /DELETE
-GO
-EXEC $(EHA_SCHEMA).OpenSession;
-EXEC $(EHA_SCHEMA).BackupContainer  '$(KEY_CONTAINER_PATH)'
-                                  , '$(KEY_CONTAINER_FILE)'
-                                  , 'KeyContainer';
-GO
--- re-mount
-:!!$(TRUECRYPT_EXE) /v $(KEY_CONTAINER_PATH)$(KEY_CONTAINER_FILE) /l$(VHD_LETTER) /p "$(TRUECRYPT_CONTAINER_ENCRYPTION_PHRASE)" /q /s /m
-GO
+
 EXEC $(EHA_SCHEMA).OpenSession;
 IF PATINDEX('%[Developer,Enterprise]%', CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128) ) ) > 0 
-  EXEC $(EHA_SCHEMA).SendOffsiteCDC    -- ChangeDataCaptuue
+  EXEC $(EHA_SCHEMA).PushCapturedChanges    -- ChangeDataCaptuue
 ELSE
-  EXEC $(EHA_SCHEMA).SendOffsiteTC;  -- Track Changes
-GO
-DECLARE @RecallId NCHAR(36);
-EXEC $(EHA_SCHEMA).OpenSession;
--- only expecting one row
-SET @RecallId = ( SELECT TOP (1) Id
-                  FROM $(EHA_SCHEMA).$(LINK_CONTAINERS_SYNONYM ) );  
-EXEC $(EHA_SCHEMA).RecallContainer @RecallId;
+  EXEC $(EHA_SCHEMA).PushTrackedChanges;  -- Track Changes
 GO
 SELECT  @@SERVERNAME + CHAR(46) + DB_NAME() + CHAR(46) + 'ReportErrors' AS [Report]; 
 EXEC $(EHA_SCHEMA).ReportErrors;
