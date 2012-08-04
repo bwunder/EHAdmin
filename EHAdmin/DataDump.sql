@@ -114,6 +114,7 @@
 GO
 SET NOCOUNT ON;
 USE $(SPOKE_DATABASE);
+EXEC $(EHA_SCHEMA).ReportErrors;
 
 /* run a report 
 EXEC $(EHA_SCHEMA).ReportErrors;
@@ -128,37 +129,37 @@ SELECT * FROM $(SPOKE_DATABASE).$(EHA_SCHEMA).zBookings
 -- Cell Cryptography
 -------------------------------------------------------------------------------
 -- Table           
---      Column             Method                     Authenticator/Salt           
+--      Column                     cryptobject                Authenticator/Salt           
 -------------------------------------------------------------------------------
 -- $(BOOKINGS_TABLE)         
---      Parameters         audit key signed cert      Id as NCHAR
---      ErrorData          portable signed key        Id as NCHAR
+--      Parameters NVARCHAR(4000)  audit symmetric key        KeyGuid NCHAR(36)
+--      ErrorData NVARCHAR(4000)   portable symmetric key     Id NCHAR(36)
 -- $(BACKUP_ACTIVITY_TABLE)  
---      BackupName         value key DMK cert         Id as NCHAR
---      BackupNameBucket   checksum/random            Salted BackupName
---      UseHash 
---      BackupPath         value key                  Salted BackupName 
---      Colophon           checksum/random            hashed from system value
+--      BackupName NVARCHAR(448)   value key                  Id NCHAR(36
+--      BackupNameBucket INT       checksum/random            Salted BackupName
+--      UseHash BIT
+--      BackupPath NVARCHAR(1024)  value key                  Salted BackupName 
+--      Colophon INT               checksum/random            hashed from system value
 --                         by Level: sys.message / key.key_guid / cert.thumbprint 
---      MAC                signed cert                sig of book row checksum 
---      ErrorData          portable signed key        Id as NCHAR
+--      MAC NVARCHAR(128)          signing cert               book row checksum       
+--      ErrorData NVARCHAR(4000)   portable signed key        Id NCHAR(36)
 -- $(NAMEVALUE_ACTIVITY_TABLE)  
---      MAC                signed cert                sig of book row checksum 
---      ErrorData          portable signed key        Id as NCHAR
+--      MAC NVARCHAR(128)          signing cert               book row checksum       
+--      ErrorData NVARCHAR(4000)   portable signed key        Id NCHAR(36)
 -- $(NAMEVALUES_TABLE)       
---      Name               value key                  Id as NCHAR                     
---      Value              value key                  Name 
---      NameBucket         checksum/hash/random yes   Salted Name 
---      ValueBucket        checksum/hash/random yes   Salted Value 
+--      Name NVARCHAR(448)         value key                  Id as NCHAR                     
+--      Value NVARCHAR(128)        value key                  Name 
+--      NameBucket INT             checksum/hash/random       Salted Name 
+--      ValueBucket INT            checksum/hash/random       Salted Value 
 -- NAMEVALUETYPE USER-DEFINED TABLE TYPE   
---      Name               value key                  -->        <--- nothing! 
---      Value              value key                  Name     
+--      Name NVARCHAR(448)         value key                  -->        <--- nothing! 
+--      Value NVARCHAR(128)        value key                  Name     
 -- $(OFFSITE_ACTIVITY_TABLE) 
---      MAC                signed by cert             sig of book row checksum 
---      ErrorData          portable signed key        Id as NCHAR  
+--      MAC NVARCHAR(128)          signing cert               book row checksum 
+--      ErrorData NVARCHAR(4000)   portable signed key        Id NCHAR(36)
 -- $(REPORT_ACTIVITY_TABLE) 
---      MAC                signed cert          no    sig of book row checksum 
---      ErrorData          portable signed key        Id as NCHAR  
+--      MAC NVARCHAR(128)          signing cert               book row checksum       
+--      ErrorData NVARCHAR(4000)   portable signed key        Id NCHAR(36)
 -------------------------------------------------------------------------------
 OPEN SYMMETRIC KEY $(ERROR_SYMMETRIC_KEY)
 DECRYPTION BY PASSWORD = '$(ERROR_KEY_ENCRYPTION_PHRASE)';
@@ -228,32 +229,6 @@ SELECT Id
      , a.CreateUser                                  
 FROM $(EHA_SCHEMA).$(BACKUP_ACTIVITY_TABLE) a 
 ORDER BY CreateUTCDT;
-
---SELECT '$(EHA_SCHEMA).$(HUB_ACTIVITY_TABLE)' AS TableName
---SELECT a.Id
---     , a.CaptureInstance
---     , a.ServerName
---     , a.Minlsn
---     , a.MaxLsn
---     , a.[RowCount]
---     , (SELECT VERIFYSIGNEDBYCERT( '$(AUTHENTICITY_CERTIFICATE)' )
---                                 , CAST(CHECKSUM( b.Id
---                                                , b.PROCID   
---                                                , b.ObjectName
---                                                , b.Parameters
---                                                , b.KeyGuid
---                                                , b.Status ) AS NVARCHAR(128) )
---                                 , a.MAC )
---        FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) AS b
---        WHERE b.Id = a.Id )  AS [MAC Check]  
---     , a.MAC
---     , a.Action
---     , a.Status
---     , CAST( DECRYPTBYKEY ( a.ErrorData, 1, CAST(Id AS NCHAR(36)) ) AS NVARCHAR(4000)) AS [ErrorInfo]
---     , a.CreateUTCDT 
---     , a.CreateUser 
---FROM $(EHA_SCHEMA).$(HUB_ACTIVITY_TABLE) a
---ORDER BY a.CreateUTCDT;
 
 SELECT '$(EHA_SCHEMA).$(NAMEVALUES_TABLE)' AS TableName
 SELECT Id
@@ -370,26 +345,6 @@ SELECT a.Id
      , a.CreateUser 
 FROM $(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE) AS a;
 
----- filetable
---SELECT '$(EHA_SCHEMA).$(BACKUP_TABLE) FILETABLE' AS TableName
---SELECT stream_id
---     , file_stream
---     , name
---     , path_locator
---     , parent_path_locator
---     , file_type
---     , cached_file_size
---     , creation_time
---     , last_write_time
---     , last_access_time
---     , is_directory
---     , is_offline
---     , is_hidden
---     , is_readonly
---     , is_archive
---     , is_system
---     , is_temporary
---FROM $(EHA_SCHEMA).$(BACKUP_TABLE) WITH (READCOMMITTEDLOCK);
 SELECT '$(EHA_SCHEMA).$(RESTORES_FILETABLE) FILETABLE' AS TableName
 -- using row versioning so must use a hint here
 SELECT stream_id
@@ -413,7 +368,142 @@ FROM $(EHA_SCHEMA).$(RESTORES_FILETABLE) WITH (READCOMMITTEDLOCK);
 
 CLOSE ALL SYMMETRIC KEYS;
 
-SELECT * FROM $(EHA_SCHEMA).InitiatorQueue 
-SELECT * FROM sys.transmission_queue 
-SELECT * FROM $(EHA_SCHEMA).TargetQueue
- 
+  SELECT [InitiatorQueue] AS [Initiator Queue Msg Count]
+        , [sysxmitqueue] AS [Transmission Queue Msg Count]
+        , [TargetQueue] AS [Target Queue Msg Count]
+  FROM (
+        SELECT q.name AS name, p.rows
+        FROM sys.objects AS o
+        JOIN sys.partitions AS p 
+        ON p.object_id = o.object_id
+        JOIN sys.objects AS q 
+        ON o.parent_object_id = q.object_id
+        WHERE o.name = 'InitiatorQueue'
+        AND SCHEMA_NAME(q.schema_id) = '$(EHA_SCHEMA)'
+        AND p.index_id = 1
+      UNION ALL 
+        SELECT o.name AS name, p.rows
+        FROM sys.objects AS o
+        JOIN sys.partitions AS p 
+        ON p.object_id = o.object_id
+        WHERE o.name = 'sysxmitqueue'
+      UNION ALL
+        SELECT q.name AS name, p.rows
+        FROM sys.objects AS o
+        JOIN sys.partitions AS p 
+        ON p.object_id = o.object_id
+        JOIN sys.objects AS q 
+        ON o.parent_object_id = q.object_id
+        WHERE q.name = 'TargetQueue'
+        AND SCHEMA_NAME(q.schema_id) = '$(EHA_SCHEMA)'
+        AND p.index_id = 1 
+                           ) AS SourceData
+  PIVOT (SUM(rows) FOR name IN ( [InitiatorQueue]
+                               , [sysxmitqueue]
+                               , [TargetQueue] ) ) AS PivotTable;     
+/*
+-- DMVs
+select object_name(queue_id), * from sys.dm_broker_queue_monitors WHERE database_id = DB_ID();
+select * from sys.dm_broker_activated_tasks
+select * from sys.dm_broker_connections
+
+--Service Broker contents
+select * from eha.InitiatorQueue -- sender writes message here
+select * from sys.transmission_queue  -- system object - sql server moves message here when it pulls it off the initiator
+select * from eha.TargetQueue WITH(NOLOCK) -- then delivers it here when it can
+--the activation proc, pTargetActivationProcedure, running on background thread(s), pulls from the target_queue
+
+select name
+     , activation_procedure
+     , [is_activation_enabled]
+     , [is_receive_enabled]
+     , [is_enqueue_enabled] 
+from sys.service_queues;  
+--WHERE name IN ( 'TargetQueue'
+--              , 'InitiatorQueue');
+
+-- initiator side error handlings
+select * from dbo.initiator_processing_errors;
+select * from dbo.unsent_messages;
+
+select service_contract_name, message_type, DATALENGTH(message_body) as MessageSize 
+from eha.TargetQueue
+*/
+/* debugging the activation procedure
+disable ACTIVATION 
+step into the procedure
+if you disable the queue you cannot put anything in it
+
+not this! it will re-enable or disable everything about the queue state
+  --ALTER QUEUE eha.TargetQueue
+  --WITH STATUS = ON or OFF
+
+this will allow messages to be sent to the target queue 
+only the activation procedure will not run automatically 
+  ALTER QUEUE eha.TargetQueue
+  WITH ACTIVATION (Status = OFF)
+
+run this initator script to put some data into the broker conversation
+but skip the check for non-active queue state above
+then select the following and hit F11 twice to step into the proc
+
+   [eha].[TargetActivation]
+
+in case a txn is open try
+
+   WHILE @@TRANCOUNT > 0
+     ROLLBACK;
+
+then turn the queue back on
+
+  ALTER QUEUE eha.TargetQueue
+  WITH ACTIVATION (Status = ON);
+
+
+--select cast(message_body as NVARCHAR(MAX)), * from target..target_queue
+
+   use master;
+
+*/
+
+
+/*
+-- to enable queue (so that [is_receive_enabled] = 1, [is_enqueue_enabled] = 1)
+ALTER QUEUE eha.InitiatorQueue
+WITH STATUS = ON
+-or-
+ALTER QUEUE eha.TargetQueue
+WITH STATUS = Off
+
+-- to enable activation (so that [is_activation_enabled] = 1)
+ALTER QUEUE eha.InitiatorQueue
+WITH ACTIVATION (STATUS = ON);
+-or-
+ALTER QUEUE eha.TargetQueue
+WITH ACTIVATION (STATUS = ON);
+
+-- to debug the activation procedure, set queue activation OFF and step into procedure
+ALTER QUEUE initiator_queue
+WITH ACTIVATION (STATUS = OFF);
+-or-
+ALTER QUEUE eha.TargetQueue
+WITH ACTIVATION (STATUS = OFF);
+
+-- to start debug, using SSMS highlight following line hit F11 twice
+[eha].[TargetActivation]
+[eha].[InitiatorActivation]
+*/
+
+/* clearing the target queue
+SELECT * FROM sys.conversation_endpoints
+
+SELECT 'END CONVERSATION ''' + CAST(conversation_handle AS NVARCHAR(MAX)) + ''' WITH CLEANUP' 
+FROM sys.conversation_endpoints
+*/
+
+/*
+ALTER QUEUE ehaTargetQueue
+WITH ACTIVATION(MAX_QUEUE_READERS = 4)
+
+
+*/ 

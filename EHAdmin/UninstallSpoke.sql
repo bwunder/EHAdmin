@@ -3,7 +3,7 @@
 -- unfortunately, the decryption key or phrase is not required to drop a master key or certificate so its:
 -- USE master; DROP MASTER KEY;
 
--- all setvars from here are needed by spoke uninstall
+-- setvars from here are needed by spoke uninstall
 :setvar HUB_LINKED_SERVER_NAME                 "Hub"                    -- "<[HUB_LINKED_SERVER_NAME],SYSNAME,Hub>"              
 :setvar HUB_SERVER_NAME                        "BWUNDER-PC\ELEVEN"      -- "<[HUB_LINKED_SERVER_NAME],SYSNAME,BWUNDER-PC\ELEVEN>"
 -- synonyms
@@ -20,7 +20,8 @@
 :setvar MASTER_KEY_BACKUP_EXT                  ".keybak"               
 :setvar PRIVATE_KEY_BACKUP_EXT                 ".prvbak"               
 :setvar PUBLIC_KEY_BACKUP_EXT                  ".cerbak"               
--- all setvars from here are needed by hub install
+
+-- setvars from here are needed by hub install
 -- principals 
 :setvar SPOKE_ADMIN                            "SpokeAdmin"            -- "<[SPOKE_ADMIN],SYSNAME,SpokeAdmin>"                   
 :setvar SPOKE_ADMIN_PASSWORD                   "sj*%tFE#4RfHgf"        -- "<[SPOKE_ADMIN_PASSWORD],PASSPHRASE,sj*%tFE#4RfHgf>"   
@@ -51,23 +52,20 @@
 :setvar FILETABLE_DIRECTORY                    "FiletableDirectory"    
 :setvar RESTORES_FILETABLE                     "Restores"              
 GO
--- try drop hub rows from this instance
 SET NOCOUNT ON;
 IF DB_ID('$(SPOKE_DATABASE)') IS NOT NULL 
   BEGIN
-
-    ALTER DATABASE $(SPOKE_DATABASE) SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-
-    IF OBJECT_ID('$(EHA_SCHEMA).$(RESTORES_FILETABLE)', 'U') IS NOT NULL
-      DROP TABLE $(EHA_SCHEMA).$(RESTORES_FILETABLE);
-    IF FILE_IDEX('$(FILESTREAM_FILE)') IS NOT NULL
-      ALTER DATABASE $(SPOKE_DATABASE) REMOVE FILE $(FILESTREAM_FILE);
-    IF FILE_ID('$(FILETABLE_DIRECTORY)') IS NOT NULL
-      ALTER DATABASE $(SPOKE_DATABASE) REMOVE FILE $(FILETABLE_DIRECTORY);
-
-    USE master;
-
-      DROP DATABASE $(SPOKE_DATABASE);
+    EXEC sp_executesql N'USE $(SPOKE_DATABASE);
+ALTER QUEUE $(EHA_SCHEMA).TargetQueue WITH ACTIVATION ( STATUS = OFF );
+ALTER DATABASE $(SPOKE_DATABASE) SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+IF OBJECT_ID(''$(EHA_SCHEMA).$(RESTORES_FILETABLE)'', ''U'') IS NOT NULL
+  DROP TABLE $(EHA_SCHEMA).$(RESTORES_FILETABLE);
+IF FILE_IDEX(''$(FILESTREAM_FILE)'') IS NOT NULL
+  ALTER DATABASE $(SPOKE_DATABASE) REMOVE FILE $(FILESTREAM_FILE);
+IF FILE_ID(''$(FILETABLE_DIRECTORY)'') IS NOT NULL
+  ALTER DATABASE $(SPOKE_DATABASE) REMOVE FILE $(FILETABLE_DIRECTORY);';
+    -- meanwhile, back in master...
+    DROP DATABASE $(SPOKE_DATABASE);
 
   END    
 GO
