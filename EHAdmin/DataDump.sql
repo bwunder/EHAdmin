@@ -1,6 +1,5 @@
 :setvar PRIVATE_ENCRYPTION_PHRASE              "y0ur secreT goes here!" -- "<[PASSPHRASE_ENCRYPTION_PHRASE],VARCHAR,y0ur secreT goes here!>"              
--- key backups go here - restores from hub are located in FileTable subfolder under this location
--- Local path, shared storage of a Windows active-passive cluster, at primary replica of availability group 
+-- key backups go here - restores from hub are located in FileTable subfolder under this location (so no UNC)
 :setvar EXPORT_PATH                            "G:\"                    -- give Full Control to SQL Server service account                                
 -- the life of the key is the life of the user's connection and it lives in tempdb just like any # temp object 
 :setvar SESSION_SYMMETRIC_KEY                  "#SessionSymmetricKey"   -- "<[SESSION_SYMMETRIC_KEY],SYSNAME,#SessionSymmetricKey>"                       
@@ -114,7 +113,6 @@
 GO
 SET NOCOUNT ON;
 USE $(SPOKE_DATABASE);
-EXEC $(EHA_SCHEMA).ReportErrors;
 
 /* run a report 
 EXEC $(EHA_SCHEMA).ReportErrors;
@@ -277,28 +275,20 @@ FROM $(EHA_SCHEMA).$(NAMEVALUE_ACTIVITY_TABLE) AS n
 ORDER BY CreateUTCDT;
 
 SELECT '$(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE)' AS TableName
-SELECT Id
-     , ServerName
-     , ConversationHandle
-     , ConversationGroupId
-     , Message 
-     , (SELECT VERIFYSIGNEDBYCERT( CERT_ID('(AUTHENTICITY_CERTIFICATE)')
-                                 , CAST(CHECKSUM( b.Id
-                                                , b.PROCID   
-                                                , b.ObjectName
-                                                , b.Parameters
-                                                , b.KeyGuid
-                                                , b.Status ) AS NVARCHAR(128) )
-                                 , a.MAC )
-        FROM $(EHA_SCHEMA).$(BOOKINGS_TABLE) AS b
-        WHERE b.Id = a.Id )  AS [MAC Check]  
-     , a.MAC
-     , a.Action
-     , a.Status
-     , CAST( DECRYPTBYKEY ( a.ErrorData, 1, CAST(Id AS NCHAR(36)) ) AS NVARCHAR(4000)) AS [ErrorInfo]
-     , a.CreateUTCDT 
-     , a.CreateUser 
-FROM $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE) a
+SELECT n.ConversationHandle
+     , n.ServerName
+     , n.ConversationGroupId
+     , n.MessageTypeName
+     , n.Message 
+     , n.Hash
+     , n.Action
+     , n.Status
+     , CAST( DECRYPTBYKEY ( n.ErrorData
+                          , 1
+                          , CAST( n.ConversationHandle AS NVARCHAR(36) ) ) AS NVARCHAR(4000)) AS [ErrorInfo]
+     , n.CreateUTCDT 
+     , n.CreateUser 
+FROM $(EHA_SCHEMA).$(NOTIFICATION_ACTIVITY_TABLE) AS n
 
 SELECT '$(EHA_SCHEMA).$(SPOKE_ACTIVITY_TABLE)' AS TableName
 SELECT a.Id
@@ -368,50 +358,105 @@ FROM $(EHA_SCHEMA).$(RESTORES_FILETABLE) WITH (READCOMMITTEDLOCK);
 
 CLOSE ALL SYMMETRIC KEYS;
 
-  SELECT [InitiatorQueue] AS [Initiator Queue Msg Count]
-        , [sysxmitqueue] AS [Transmission Queue Msg Count]
-        , [TargetQueue] AS [Target Queue Msg Count]
-  FROM (
-        SELECT q.name AS name, p.rows
-        FROM sys.objects AS o
-        JOIN sys.partitions AS p 
-        ON p.object_id = o.object_id
-        JOIN sys.objects AS q 
-        ON o.parent_object_id = q.object_id
-        WHERE o.name = 'InitiatorQueue'
-        AND SCHEMA_NAME(q.schema_id) = '$(EHA_SCHEMA)'
-        AND p.index_id = 1
-      UNION ALL 
-        SELECT o.name AS name, p.rows
-        FROM sys.objects AS o
-        JOIN sys.partitions AS p 
-        ON p.object_id = o.object_id
-        WHERE o.name = 'sysxmitqueue'
-      UNION ALL
-        SELECT q.name AS name, p.rows
-        FROM sys.objects AS o
-        JOIN sys.partitions AS p 
-        ON p.object_id = o.object_id
-        JOIN sys.objects AS q 
-        ON o.parent_object_id = q.object_id
-        WHERE q.name = 'TargetQueue'
-        AND SCHEMA_NAME(q.schema_id) = '$(EHA_SCHEMA)'
-        AND p.index_id = 1 
-                           ) AS SourceData
-  PIVOT (SUM(rows) FOR name IN ( [InitiatorQueue]
-                               , [sysxmitqueue]
-                               , [TargetQueue] ) ) AS PivotTable;     
+SELECT session_id, start_time, end_time, duration, scan_phase
+    error_count, start_lsn, current_lsn, end_lsn, tran_count
+    last_commit_lsn, last_commit_time, log_record_count, schema_change_count
+    command_count, first_begin_cdc_lsn, last_commit_cdc_lsn, 
+    last_commit_cdc_time, latency, empty_scan_count, failed_sessions_count
+FROM sys.dm_cdc_log_scan_sessions
+WHERE session_id = (SELECT MAX(b.session_id) FROM sys.dm_cdc_log_scan_sessions AS b);
+
+SELECT [InitiatorQueue] AS [Initiator Queue Msg Count]
+      , [sysxmitqueue] AS [Transmission Queue Msg Count]
+      , [TargetQueue] AS [Target Queue Msg Count]
+FROM (
+      SELECT po.name AS name, p.rows
+      FROM sys.objects AS o
+      JOIN sys.partitions AS p 
+      ON p.object_id = o.object_id
+      JOIN sys.objects AS po 
+      ON o.parent_object_id = po.object_id
+      WHERE po.name = 'InitiatorQueue'
+      AND SCHEMA_NAME(po.schema_id) = '$(EHA_SCHEMA)'
+      AND p.index_id = 1
+    UNION ALL 
+      SELECT o.name AS name, p.rows
+      FROM sys.objects AS o
+      JOIN sys.partitions AS p 
+      ON p.object_id = o.object_id
+      WHERE o.name = 'sysxmitqueue'
+    UNION ALL
+      SELECT po.name AS name, p.rows
+      FROM sys.objects AS o
+      JOIN sys.partitions AS p 
+      ON p.object_id = o.object_id
+      JOIN sys.objects AS po 
+      ON o.parent_object_id = po.object_id
+      WHERE po.name = 'TargetQueue'
+      AND SCHEMA_NAME(po.schema_id) = '$(EHA_SCHEMA)'
+      AND p.index_id = 1 
+                          ) AS SourceData
+PIVOT (SUM(rows) 
+FOR SourceData.name 
+IN ( [InitiatorQueue]
+    , [sysxmitqueue]
+    , [TargetQueue] ) ) AS PivotTable;     
+
+--Service Broker contents
+SELECT e.conversation_handle
+     , e.conversation_id
+     , e.conversation_group_id
+     , IIF( is_initiator=1
+          , 'Initiator'
+          , 'Target') AS [BrokerRole]
+     , IIF( is_initiator=1
+          , e.send_sequence
+          , e.receive_sequence ) AS [sequence]
+     , IIF ( q.is_receive_enabled = 1 AND q.is_enqueue_enabled = 1 
+           , IIF ( q.is_activation_enabled = 1
+                 , 'Enabled & Activated'
+                 ,'ACTIVATION DISABLED' )
+           ,'QUEUE DISABLED' ) AS Status
+     , q.activation_procedure
+     , c.name AS [service_contract]
+     , s.name AS [service]
+     , e.state_desc
+     , e.far_service
+     , object_name(q.object_id) AS [queue]
+     , m.state AS [dm state]
+     , m.last_activated_time
+     , e.dialog_timer
+FROM sys.service_queues AS q
+JOIN sys.services AS s
+ON s.service_queue_id = q.object_id
+LEFT JOIN sys.dm_broker_queue_monitors AS m
+ON m.queue_id = q.object_id
+LEFT JOIN sys.conversation_endpoints AS e
+ON e.service_id =  s.service_id
+JOIN sys.service_contracts AS c
+ON e.service_contract_id = c.service_contract_id
+ORDER BY is_initiator desc; 
+
 /*
+
+select *, try_cast(message_body AS XML) 
+from eha.InitiatorQueue -- sender writes message here
+
+select *, try_cast(message_body AS XML) 
+from sys.transmission_queue  -- system object - sql server moves message here when it pulls it off the initiator
+
+select *, try_cast(message_body AS XML) 
+from eha.TargetQueue WITH(NOLOCK) -- then delivers it here when it can
+
+select service_contract_name
+     , message_type_name
+     , DATALENGTH(message_body) as MessageSize 
+from eha.TargetQueue
+
 -- DMVs
 select object_name(queue_id), * from sys.dm_broker_queue_monitors WHERE database_id = DB_ID();
 select * from sys.dm_broker_activated_tasks
 select * from sys.dm_broker_connections
-
---Service Broker contents
-select * from eha.InitiatorQueue -- sender writes message here
-select * from sys.transmission_queue  -- system object - sql server moves message here when it pulls it off the initiator
-select * from eha.TargetQueue WITH(NOLOCK) -- then delivers it here when it can
---the activation proc, pTargetActivationProcedure, running on background thread(s), pulls from the target_queue
 
 select name
      , activation_procedure
@@ -422,48 +467,6 @@ from sys.service_queues;
 --WHERE name IN ( 'TargetQueue'
 --              , 'InitiatorQueue');
 
--- initiator side error handlings
-select * from dbo.initiator_processing_errors;
-select * from dbo.unsent_messages;
-
-select service_contract_name, message_type, DATALENGTH(message_body) as MessageSize 
-from eha.TargetQueue
-*/
-/* debugging the activation procedure
-disable ACTIVATION 
-step into the procedure
-if you disable the queue you cannot put anything in it
-
-not this! it will re-enable or disable everything about the queue state
-  --ALTER QUEUE eha.TargetQueue
-  --WITH STATUS = ON or OFF
-
-this will allow messages to be sent to the target queue 
-only the activation procedure will not run automatically 
-  ALTER QUEUE eha.TargetQueue
-  WITH ACTIVATION (Status = OFF)
-
-run this initator script to put some data into the broker conversation
-but skip the check for non-active queue state above
-then select the following and hit F11 twice to step into the proc
-
-   [eha].[TargetActivation]
-
-in case a txn is open try
-
-   WHILE @@TRANCOUNT > 0
-     ROLLBACK;
-
-then turn the queue back on
-
-  ALTER QUEUE eha.TargetQueue
-  WITH ACTIVATION (Status = ON);
-
-
---select cast(message_body as NVARCHAR(MAX)), * from target..target_queue
-
-   use master;
-
 */
 
 
@@ -473,9 +476,9 @@ ALTER QUEUE eha.InitiatorQueue
 WITH STATUS = ON
 -or-
 ALTER QUEUE eha.TargetQueue
-WITH STATUS = Off
+WITH STATUS = ON
 
--- to enable activation (so that [is_activation_enabled] = 1)
+--  [is_activation_enabled] = 1
 ALTER QUEUE eha.InitiatorQueue
 WITH ACTIVATION (STATUS = ON);
 -or-
@@ -483,7 +486,7 @@ ALTER QUEUE eha.TargetQueue
 WITH ACTIVATION (STATUS = ON);
 
 -- to debug the activation procedure, set queue activation OFF and step into procedure
-ALTER QUEUE initiator_queue
+ALTER QUEUE InitiatorQueue
 WITH ACTIVATION (STATUS = OFF);
 -or-
 ALTER QUEUE eha.TargetQueue
@@ -500,10 +503,3 @@ SELECT * FROM sys.conversation_endpoints
 SELECT 'END CONVERSATION ''' + CAST(conversation_handle AS NVARCHAR(MAX)) + ''' WITH CLEANUP' 
 FROM sys.conversation_endpoints
 */
-
-/*
-ALTER QUEUE ehaTargetQueue
-WITH ACTIVATION(MAX_QUEUE_READERS = 4)
-
-
-*/ 

@@ -40,7 +40,7 @@
 :setvar BOOKINGS_TABLE                         "Bookings"              
 :setvar BACKUPS_TABLE                          "Backups"               
 :setvar BACKUP_ACTIVITY_TABLE                  "BackupActivity"        
-:setvar HUB_ACTIVITY_TABLE                     "HubActivity"           -- created on hub only - use synonym at spoke
+:setvar HUB_ACTIVITY_TABLE                     "HubActivity"           -- created on hub only - use synonym at spoke             
 :setvar NAMEVALUES_TABLE                       "NameValues"            
 :setvar NAMEVALUE_ACTIVITY_TABLE               "NameValueActivity"     
 :setvar NOTIFICATION_ACTIVITY_TABLE            "NotificationActivity"  
@@ -138,4 +138,10 @@ IF EXISTS ( SELECT *
             WHERE s.name = N'$(HUB_SERVER_NAME)' 
             AND s.server_id > 0 ) -- do not drop the local server
   EXEC sp_dropserver '$(HUB_SERVER_NAME)';
+-- should only be development where hub and spoke are on same slq instance 
+IF DB_ID('$(HUB_DATABASE)') IS NULL               
+  BEGIN
+    DROP LOGIN $(SPOKE_ADMIN);
+    DROP LOGIN $(SPOKE_BROKER);
+  END
 GO
