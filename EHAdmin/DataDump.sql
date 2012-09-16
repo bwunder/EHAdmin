@@ -115,8 +115,8 @@ SET NOCOUNT ON;
 USE $(SPOKE_DATABASE);
 
 /* run a report 
-EXEC $(EHA_SCHEMA).ReportErrors;
-EXEC $(EHA_SCHEMA).ReportServerSummary;
+EXEC $(EHA_SCHEMA).ReportRecentSpokeErrors;
+EXEC $(EHA_SCHEMA).ReportRecentAdminActivity;
 EXEC $(EHA_SCHEMA).ReportActivityHistory;
 
 -- if query fails there is link problem to offsite 
@@ -235,16 +235,17 @@ SELECT Id
      , ValueBucket
      , Version
      , Name AS [Name (deciphered)]
+     , DecryptedValue AS [Value (deciphered)]
      , CASE WHEN PATINDEX ( '%.Private', Name ) = 0 
-            THEN DecryptedValue
-            ELSE CAST( DecryptByPassphrase( '$(PRIVATE_ENCRYPTION_PHRASE)', DecryptedValue ) AS NVARCHAR(128))
-            END AS [Value (deciphered)]
+            THEN 'not a private value'
+            ELSE CAST( DECRYPTBYPASSPHRASE( '$(PRIVATE_ENCRYPTION_PHRASE)', DecryptedValue ) AS NVARCHAR(128))
+            END AS [Private Value (deciphered)]
      , CreateUTCDT
      , CreateUser
-FROM (SELECT CAST(DecryptByKey( Name, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(128) ) AS [Name]
-           , CAST(DecryptByKey( Value
+FROM (SELECT CAST(DECRYPTBYKEY( Name, 1, CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(128) ) AS [Name]
+           , CAST(DECRYPTBYKEY( Value
                               , 1
-                              , CAST(DecryptByKey( Name
+                              , CAST(DECRYPTBYKEY( Name
                                                  , 1
                                                  , CAST( Id AS NCHAR(36) ) ) AS NVARCHAR(128) ) 
                               ) AS NVARCHAR(128) ) AS [DecryptedValue] 
@@ -279,8 +280,8 @@ SELECT n.ConversationHandle
      , n.ServerName
      , n.ConversationGroupId
      , n.MessageTypeName
-     , n.Message 
-     , n.Hash
+     , CAST ( REPLACE( CAST( n.MessageBody AS NVARCHAR(MAX) ), '$#xOD;', '') AS XML )
+     , n.HashIndex
      , n.Action
      , n.Status
      , CAST( DECRYPTBYKEY ( n.ErrorData
@@ -315,7 +316,7 @@ ORDER BY a.CreateUTCDT;
 SELECT '$(EHA_SCHEMA).$(REPORT_ACTIVITY_TABLE)' AS TableName
 SELECT a.Id
      , a.ServerName
-     , a.ReportProcedure
+     , a.Action
      , a.Duration_ms
      , a.RowsReturned
      , (SELECT VERIFYSIGNEDBYCERT( CERT_ID('(AUTHENTICITY_CERTIFICATE)')
@@ -358,13 +359,10 @@ FROM $(EHA_SCHEMA).$(RESTORES_FILETABLE) WITH (READCOMMITTEDLOCK);
 
 CLOSE ALL SYMMETRIC KEYS;
 
-SELECT session_id, start_time, end_time, duration, scan_phase
-    error_count, start_lsn, current_lsn, end_lsn, tran_count
-    last_commit_lsn, last_commit_time, log_record_count, schema_change_count
-    command_count, first_begin_cdc_lsn, last_commit_cdc_lsn, 
-    last_commit_cdc_time, latency, empty_scan_count, failed_sessions_count
+SELECT *
 FROM sys.dm_cdc_log_scan_sessions
-WHERE session_id = (SELECT MAX(b.session_id) FROM sys.dm_cdc_log_scan_sessions AS b);
+WHERE log_record_count > 0
+ORDER BY session_id;
 
 SELECT [InitiatorQueue] AS [Initiator Queue Msg Count]
       , [sysxmitqueue] AS [Transmission Queue Msg Count]
@@ -440,12 +438,15 @@ ORDER BY is_initiator desc;
 /*
 
 select *, try_cast(message_body AS XML) 
+from EventNotificationErrorsQueue
+
+select *, try_cast(message_body AS XML) 
 from eha.InitiatorQueue -- sender writes message here
 
-select *, try_cast(message_body AS XML) 
+select *, ISNULL( try_cast(message_body AS XML), try_cast(message_body AS NVARCHAR(MAX) ) ) 
 from sys.transmission_queue  -- system object - sql server moves message here when it pulls it off the initiator
 
-select *, try_cast(message_body AS XML) 
+select *, ISNULL( try_cast(message_body AS XML), try_cast(message_body AS NVARCHAR(MAX) ) ) 
 from eha.TargetQueue WITH(NOLOCK) -- then delivers it here when it can
 
 select service_contract_name

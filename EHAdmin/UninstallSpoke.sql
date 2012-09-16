@@ -52,11 +52,16 @@
 :setvar FILETABLE_DIRECTORY                    "FiletableDirectory"    
 :setvar RESTORES_FILETABLE                     "Restores"              
 GO
+USE master;
 SET NOCOUNT ON;
 IF DB_ID('$(SPOKE_DATABASE)') IS NOT NULL 
   BEGIN
     EXEC sp_executesql N'USE $(SPOKE_DATABASE);
-ALTER QUEUE $(EHA_SCHEMA).TargetQueue WITH ACTIVATION ( STATUS = OFF );
+IF EXISTS (SELECT * FROM sys.service_queues 
+           WHERE name = ''TargetQueue''
+           AND schema_id = SCHEMA_ID( ''$(EHA_SCHEMA)'' )
+           AND is_activation_enabled = 1 ) 
+  ALTER QUEUE $(EHA_SCHEMA).TargetQueue WITH ACTIVATION ( STATUS = OFF );
 ALTER DATABASE $(SPOKE_DATABASE) SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
 IF OBJECT_ID(''$(EHA_SCHEMA).$(RESTORES_FILETABLE)'', ''U'') IS NOT NULL
   DROP TABLE $(EHA_SCHEMA).$(RESTORES_FILETABLE);
@@ -66,10 +71,8 @@ IF FILE_ID(''$(FILETABLE_DIRECTORY)'') IS NOT NULL
   ALTER DATABASE $(SPOKE_DATABASE) REMOVE FILE $(FILETABLE_DIRECTORY);';
     -- meanwhile, back in master...
     DROP DATABASE $(SPOKE_DATABASE);
-
   END    
 GO
-
 IF EXISTS ( SELECT * 
             FROM sys.server_event_notifications
             WHERE name = 'DDLChangesSrv' )
@@ -77,9 +80,10 @@ IF EXISTS ( SELECT *
 
 IF EXISTS (SELECT * FROM sys.server_audits
            WHERE name = 'ehaSchemaAudit' ) 
-  BEGIN
+  BEGIN  
     ALTER SERVER AUDIT ehaSchemaAudit 
     WITH (STATE = OFF);
+
     DROP SERVER AUDIT ehaSchemaAudit;
   END
 
