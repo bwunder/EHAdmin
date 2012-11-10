@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+<SqlWorkbenchSqlProject xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Name="EHAdmin">
+  <Items>
+    <LogicalFolder Name="Connections" Type="2" Sorted="true">
+      <Items>
+        <ConnectionNode Name="HOST:FOREST\Administrator">
+          <Created>2012-10-02T09:09:29.6519763-07:00</Created>
+          <Type>SQL</Type>
+          <Server>HOST</Server>
+          <UserName />
+          <Authentication>Windows Authentication</Authentication>
+          <InitialDB />
+          <LoginTimeout>15</LoginTimeout>
+          <ExecutionTimeout>0</ExecutionTimeout>
+          <ConnectionProtocol>NotSpecified</ConnectionProtocol>
+          <ApplicationName>Microsoft SQL Server Management Studio - Query</ApplicationName>
+        </ConnectionNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Queries" Type="0" Sorted="true">
+      <Items>
+        <FileNode Name="HubInstallAzure.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>HubInstallAzure.sql</FullPath>
+        </FileNode>
+        <FileNode Name="HubInstallSQL.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>HubInstallSQL.sql</FullPath>
+        </FileNode>
+        <FileNode Name="HubSummary.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>HubSummary.sql</FullPath>
+        </FileNode>
+        <FileNode Name="HubUninstallAzure.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>HubUninstallAzure.sql</FullPath>
+        </FileNode>
+        <FileNode Name="HubUninstallSQL.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>HubUninstallSQL.sql</FullPath>
+        </FileNode>
+        <FileNode Name="SpokeDumpData.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>SpokeDumpData.sql</FullPath>
+        </FileNode>
+        <FileNode Name="SpokeInstall.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>SpokeInstall.sql</FullPath>
+        </FileNode>
+        <FileNode Name="SpokeUninstall.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>SpokeUninstall.sql</FullPath>
+        </FileNode>
+        <FileNode Name="SpokeVerifyDelta.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>SpokeVerifyDelta.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Variables.sql">
+          <AssociatedConnectionMoniker>8c91a03d-f9b4-46c0-a305-b5dcc79ff907:HOST:True</AssociatedConnectionMoniker>
+          <AssociatedConnSrvName>HOST</AssociatedConnSrvName>
+          <AssociatedConnUserName />
+          <FullPath>Variables.sql</FullPath>
+        </FileNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Miscellaneous" Type="3" Sorted="true">
+      <Items />
+    </LogicalFolder>
+  </Items>
+</SqlWorkbenchSqlProject>
