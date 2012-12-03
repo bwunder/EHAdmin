@@ -13,17 +13,11 @@ IF SERVERPROPERTY('EngineEdition') <> 5 -- SQL Azure
         DROP DATABASE $(HUB_DATABASE);     
       END
     
-    IF ( SELECT c.value_in_use 
+   -- no logins if contained - do not mess with the server setting - could break something else
+   IF ( SELECT c.value_in_use 
          FROM sys.configurations AS c
-         JOIN select * from sys.databases 
-          WHERE name = 'contained database authentication' ) = 1
-      BEGIN
-        EXEC sp_configure 'contained database authentication', 0;
-        RECONFIGURE;
-        RAISERROR('RECONFIGURE complete.',0,0);
-      END
-    ELSE
-      BEGIN
+         WHERE c.name = 'contained database authentication' ) = 0
+       BEGIN
         IF SUSER_SID( '$(SPOKE_ADMIN)' ) IS NOT NULL
           DROP LOGIN $(SPOKE_ADMIN);
         IF SUSER_SID( '$(SPOKE_BROKER)' ) IS NOT NULL

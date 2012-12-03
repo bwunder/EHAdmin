@@ -12,24 +12,24 @@ SET NOCOUNT ON;
 -- Secrets - if the file is saved the secrets may be compromised
 -------------------------------------------------------------------------------
 -- YOU MUST REMEMBER! used for administrator's .PRIVATE obfuscation   
-:setvar PRIVATE_ENCRYPTION_PHRASE              "your personal secret"   -- "<[PRIVATE_ENCRYPTION_PHRASE],VARCHAR,>"                                     
+--:setvar YOUR_PRIVATE_PHRASE              "your personal secret"   -- "<[YOUR_PRIVATE_PHRASE],VARCHAR,>"                                     
 -- private phrase is hard coded into encrypted Book stored procedure only
-:setvar AUDITOR_PRIVATE_PHRASE           "Auditors Little Secret" -- "<[AUDITOR_PRIVATE_PHRASE],PASSPHRASE*,Auditors Little Secret>"       
+--:setvar AUDITOR_PRIVATE_PHRASE           "Auditors Little Secret" -- "<[AUDITOR_PRIVATE_PHRASE],PASSPHRASE*,Auditors Little Secret>"       
 -- AUDIT_CERTIFICATE_ENCRYPTION_PHRASE stored as .PRIVATE value 
 -- using AUDITOR_PRIVATE_PHRASE for private layer encryptor
 :setvar AUDIT_CERTIFICATE_ENCRYPTION_PHRASE "Au&6Gf% 3Fe14CQAN@wcf?" -- "<[AUDIT_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,Au&6Gf% 3Fe14CQAN@wcf?>"  
 -- knowledge of phrase allows error review on local sql instance
 :setvar ERROR_KEY_ENCRYPTION_PHRASE      "Yu&6Gf %3Fe13FZRE@wc?f" -- "<[ERROR_KEY_ENCRYPYION_PHRASE],PASSPHRASE*,Yu&6Gf %3Fe13FZRE@wc?f>"           
 -- hardcoded into the (hopefully encrypted!) Book stored procedure 
-:setvar HUB_ODBC_AGENT_PASSWORD                "VerifyDSN1"             -- "<[HUB_ODBC_AGENT_PASSWORD],PASSPHRASE*,VerifyDSN1>"                            
+--:setvar HUB_ODBC_AGENT_PASSWORD                "VerifyDSN1"             -- "<[HUB_ODBC_AGENT_PASSWORD],PASSPHRASE*,VerifyDSN1>"                            
 -- passphrases must pass hardness test (policy in CheckPhrase function)  
-:setvar HUB_ADMIN_PASSWORD                     "si*%tPW#4RfHgd"         -- "<[HUB_ADMIN_PASSWORD],PASSPHRASE*,si*%tFE#4RfHgd>"                             
-:setvar SPOKE_ADMIN_PASSWORD                   "sj*%tFE#4RfHgf"         -- "<[SPOKE_ADMIN_PASSWORD],PASSPHRASE*,sj*%tFE#4RfHgf>"                           
-:setvar SPOKE_BROKER_PASSWORD                  "sk*%tFE#4RfHge"         -- "<[SPOKE_BROKER_PASSWORD],PASSPHRASE*,sk*%tFE#4RfHge>"                          
+--:setvar HUB_ADMIN_PASSWORD                     "si*%tPW#4RfHgd"         -- "<[HUB_ADMIN_PASSWORD],PASSPHRASE*,si*%tFE#4RfHgd>"                             
+--:setvar SPOKE_ADMIN_PASSWORD                   "sj*%tFE#4RfHgf"         -- "<[SPOKE_ADMIN_PASSWORD],PASSPHRASE*,sj*%tFE#4RfHgf>"                           
+--:setvar SPOKE_BROKER_PASSWORD                  "sk*%tFE#4RfHge"         -- "<[SPOKE_BROKER_PASSWORD],PASSPHRASE*,sk*%tFE#4RfHge>"                          
 :setvar SMK_BACKUP_PHRASE                      "Ku&6 Gf43Fe1 UIOE@zcf?" -- "<[SMK_BACKUP_PHRASE],PASSPHRASE*,Ku&6 Gf43Fe1 UIOE@zcf?>"                      
-:setvar master_DMK_ENCRYPTION_PHRASE           "Qu&6G f%3Fe2DUOL@yc?f"  -- "<[master_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Qu&6G f%3Fe2DUOL@yc?f>"            
+--:setvar master_DMK_ENCRYPTION_PHRASE           "Qu&6G f%3Fe2DUOL@yc?f"  -- "<[master_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Qu&6G f%3Fe2DUOL@yc?f>"            
 :setvar TDE_CERTIFICATE_BACKUP_PHRASE          "Wu&6Gf% 3Fe4VBNM@wc?f"  -- "<[TDE_CERTIFICATE_BACKUP_PHRASE],PASSPHRASE*,Wu&6Gf% 3Fe4VBNM@wc?f>"           
-:setvar EHDB_DMK_ENCRYPTION_PHRASE             "Memorize if U can!"     -- "<[EHDB_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Memorize if U can!>"                 
+--:setvar EHDB_DMK_ENCRYPTION_PHRASE             "Memorize if U can!"     -- "<[EHDB_DMK_ENCRYPTION_PHRASE],PASSPHRASE*,Memorize if U can!>"                 
 :setvar FILE_CERTIFICATE_ENCRYPTION_PHRASE     "sd89f7ny*&NH 8E43BHFjh" -- "<[FILE_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,sd89f7ny*&NH 8E43BHFjh>"     
 :setvar NAME_CERTIFICATE_ENCRYPTION_PHRASE     "Fe9 ROIT@wc?fZu&6Gf%3"  -- "<[OBJECT_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,Fe9 ROIT@wc?fZu&6Gf%3>"    
 :setvar OBJECT_CERTIFICATE_ENCRYPTION_PHRASE   "Lu&6Gf%3Fe9 ROIT@wc?f"  -- "<[OBJECT_CERTIFICATE_ENCRYPTION_PHRASE],PASSPHRASE*,Lu&6Gf%3Fe9 ROIT@wc?f>"    
@@ -2078,7 +2078,7 @@ RETURNS BIT
 $(WITH_OPTIONS)
 AS
 BEGIN
-  RETURN ( SELECT CASE WHEN  PATINDEX( '%[#,.;:"'']%', Name ) 
+  RETURN ( SELECT CASE WHEN  PATINDEX( '%[$#,.;:"'']%', Name ) 
                            + PATINDEX( '%--%',         Name )
                            + PATINDEX( '%*/%',         Name )
                            + PATINDEX( '%/*%',         Name )
@@ -2182,8 +2182,8 @@ BEGIN
           SET @UpValue = UPPER(@Value);
           SET @Status = 'strength';
           IF ( (    ( LEN(@Value) >= $(MIN_PHRASE_LENGTH) )   -- more is better
-                AND ( PATINDEX('%[#,.;:]%'
-                    , @Value ) = 0 )   -- none of these symbols as recommended in BOL 
+                AND ( PATINDEX('%[$#,.;:]%'
+                    , @Value ) = 0 )   -- none of these symbols as recommended in BOL = $ 
                 AND ( SELECT CASE WHEN PATINDEX('%[A-Z]%'
                                                 , @Value) > 0 
                                   THEN 1 ELSE 0 END    -- has uppercase
@@ -7483,7 +7483,7 @@ EXEC $(EHA_SCHEMA).AddPortableSymmetricKey @KeyName = '$(ERROR_SYMMETRIC_KEY)'
 -- redundant because SQL Server encrypts any cached linked server passwords  - but that one cannot be recalled 
 EXEC $(EHA_SCHEMA).OpenSession;
 SET @PrivatePhrase = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
-                                         ,  CAST( '$(PRIVATE_ENCRYPTION_PHRASE)' AS NVARCHAR (128) ) ) );
+                                         ,  CAST( '$(YOUR_PRIVATE_PHRASE)' AS NVARCHAR (128) ) ) );
 SET @Value = (SELECT ENCRYPTBYKEY( KEY_GUID('$(SESSION_SYMMETRIC_KEY)')
                                  ,  CAST( '$(SPOKE_ADMIN_PASSWORD)' AS NVARCHAR (128) ) ) );
 EXEC $(EHA_SCHEMA).AddPrivateValue @Name = 'SPOKE_ADMIN_PASSWORD'

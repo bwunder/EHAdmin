@@ -1,8 +1,6 @@
 :setvar HUB_ADMIN_PASSWORD                     "si*%tPW#4RfHgd"                
 GO
-:r C:\Users\bwunder\Documents\GitHub\EHAdmin\EHAdmin\Variables_Principals.sql  
-:r C:\Users\bwunder\Documents\GitHub\EHAdmin\EHAdmin\Variables_Schema.sql      
-:r C:\Users\bwunder\Documents\GitHub\EHAdmin\EHAdmin\Variables_SpokeSettings.sql
+:r C:\Users\bwunder\Documents\GitHub\EHAdmin\EHAdmin\Variables.sql  
 GO 
 :Connect <SQLAZURE.instance.name> -U$(HUB_ADMIN)@$(HUB_SERVER_NAME) -P$(HUB_ADMIN_PASSWORD)
 GO

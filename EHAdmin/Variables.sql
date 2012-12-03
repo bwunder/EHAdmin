@@ -1,14 +1,16 @@
 -- CTRL+SHFT+M to replace tokens
 :on error exit                                                                 
-:setvar HUB_SERVER_NAME                  "."                                   
+--#:setvar HUB_SERVER_NAME                  "."                                   
 -- in live environments use "WITH EXECUTE AS CALLER, ENCRYPTION" 
-:setvar WITH_OPTIONS               "WITH EXECUTE AS CALLER, ENCRYPTION"        
+--#:setvar WITH_OPTIONS               "WITH EXECUTE AS CALLER, ENCRYPTION"        
 --hub data store
 :setvar HUB_DATASOURCE                   "Hub"                                 
 :setvar HUB_LINKED_SERVER_NAME           "Hub"                                 
-:setvar HUB_DATABASE                     "ehHub"                               
+
+--#:setvar HUB_DATABASE                     "ehHub"                               
+
 --spoke data store
-:setvar SPOKE_DATABASE                   "ehdb"                                
+--#:setvar SPOKE_DATABASE                   "ehdb"                                
 --- export file extensions (file will not have extension if (.) is omitted)                                             
 :setvar MASTER_KEY_BACKUP_EXT            ".keybak"                             
 :setvar PRIVATE_KEY_BACKUP_EXT           ".prvbak"                             
@@ -31,23 +33,25 @@
 :setvar TIMER_TIMEOUT                    "120"                                 
 -- audit to "SECURITY" log more secure but restricted access
 :setvar SQLAUDIT_TO                      "APPLICATION"                         
+
 -- user is schema owner at hub with read access at spokes, for SQLAzure this must be the admin user  
-:setvar HUB_ADMIN                        "HubAdmin"               -- "<[HUB_ADMIN],SYSNAME,HubAdmin>"                                
+--#:setvar HUB_ADMIN                        "HubAdmin"               -- "<[HUB_ADMIN],SYSNAME,HubAdmin>"                                
 ---- unprivledged hub user for connection testing when creating ODBC DSN with ODBCAD32.exe
-:setvar HUB_ODBC_AGENT                   "HubAgent"               -- "<[HUB_ODBC_AGENT],SYSNAME,HubAgent>"                           
+--#:setvar HUB_ODBC_AGENT                   "HubAgent"               -- "<[HUB_ODBC_AGENT],SYSNAME,HubAgent>"                           
 ---- user is schema owner at spoke with read access at hub
-:setvar SPOKE_ADMIN                      "SpokeAdmin"             -- "<[SPOKE_ADMIN],SYSNAME,SpokeAdmin>"                            
+--#:setvar SPOKE_ADMIN                      "SpokeAdmin"             -- "<[SPOKE_ADMIN],SYSNAME,SpokeAdmin>"                            
 ---- activation EXECUTE AS user - schema owner at spoke with read and insert permissions at hub
-:setvar SPOKE_BROKER                     "SpokeBroker"            -- "<[SPOKE_BROKER],SYSNAME,SpokeBroker>"                          
+--#:setvar SPOKE_BROKER                     "SpokeBroker"            -- "<[SPOKE_BROKER],SYSNAME,SpokeBroker>"                          
+
 -- roles
-:setvar HUB_ADMIN_ROLE                   "HubAdministrators"      -- "<[HUB_ADMIN_ROLE],SYSNAME,HubAdministrators>"                  
-:setvar SPOKE_ADMIN_ROLE                 "SpokeAdministrators"    -- "<[SPOKE_ADMIN_ROLE],SYSNAME,SpokeAdministrators>"              
+--:setvar HUB_ADMIN_ROLE                   "HubAdministrators"      -- "<[HUB_ADMIN_ROLE],SYSNAME,HubAdministrators>"                  
+--:setvar SPOKE_ADMIN_ROLE                 "SpokeAdministrators"    -- "<[SPOKE_ADMIN_ROLE],SYSNAME,SpokeAdministrators>"              
 :setvar SESSION_SYMMETRIC_KEY            "#SessionSymmetricKey"   -- "<[SESSION_SYMMETRIC_KEY],SYSNAME,#SessionSymmetricKey>"        
 :setvar SESSION_KEY_SOURCE               "SessionKeySource"       -- "<[SESSION_KEY_SOURCE],NVARCHAR,SessionKeySource>"              
 :setvar SESSION_KEY_IDENTITY             "SessionKeyIdentity"     -- "<[SESSION_KEY_IDENTITY],NVARCHAR,SessionKeyIdentity>"          
 :setvar SESSION_KEY_ENCRYPTION_PHRASE    "NOT checked 4 hardness" -- "<[SESSION_KEY_ENCRYPTION_PHRASE],PASSPHRASE,NOT checked 4 hardness>"
 -- master database encryption hierarchy (hierarchy for SPOKE_DATEBASE TDE certificate)  
-:setvar TDE_CERTIFICATE                  "TDECertificate"         -- "<[TDE_CERTIFICATE] - for EHDB TDE,SYSNAME,TDECertificate>"     
+--:setvar TDE_CERTIFICATE                  "TDECertificate"         -- "<[TDE_CERTIFICATE] - for EHDB TDE,SYSNAME,TDECertificate>"     
 :setvar TDE_CERTIFICATE_ALGORITHM        "AES_256"                -- "<[TDE_CERTIFICATE_ALGORITHM],SYSNAME,AES_256>"                 
 -- EHDB database encryption hierarchy
 -- authenticity cert protects man-in-the-middle and primary storage vectors, e.g. TVPs, passed values 
@@ -56,7 +60,7 @@
 --  
 :setvar EVENT_CERTIFICATE                "EventCertificate"       -- "<[EVENT_CERTIFICATE],SYSNAME,EventCertificate>                 
 -- BACKUP_ACTIVITY.Names BACKUP_ACTIVITY.Path cell encryption
-:setvar FILE_CERTIFICATE                 "FileCertificate"        -- "<[FILE_CERTIFICATE],SYSNAME,FileCertificate>                   
+--:setvar FILE_CERTIFICATE                 "FileCertificate"        -- "<[FILE_CERTIFICATE],SYSNAME,FileCertificate>                   
 :setvar FILE_SYMMETRIC_KEY               "FileKey"                -- "<[FILE_SYMMETRIC_KEY],SYSNAME,FileKey>"                        
 :setvar FILE_KEY_ENCRYPTION_ALGORITHM    "AES_256"                -- "<[FILE_KEY_ENCRYPTION_ALGORITHM],SYSNAME,AES_256>"             
 -- NameValues.Names cell encryption
@@ -72,12 +76,12 @@
 
 :setvar HASHBYTES_ALGORITHM              "SHA2_512"               -- "<[HASHBYTES_ALGORITHM],SYSNAME,SHA2_512>"                      
 -- schema
-:setvar EHA_SCHEMA                       "eha"                    -- "<[EHA_SCHEMA],SYSNAME,eha>"                                    
+--:setvar EHA_SCHEMA                       "eha"                    -- "<[EHA_SCHEMA],SYSNAME,eha>"                                    
 -- tables
 :setvar BOOKINGS_TABLE                   "Bookings"               -- "<[BOOKINGS_TABLE],SYSNAME,Bookings>"                           
 :setvar BACKUPS_TABLE                    "Backups"                -- "<[BACKUPS_TABLE],SYSNAME,Backups>"                             
 :setvar BACKUP_ACTIVITY_TABLE            "BackupActivity"         -- "<[BACKUP_ACTIVITY_TABLE],SYSNAME,BackupActivity>"              
--- created on hub only  
+-- this one created on hub only - all spokes see the synonym  
 :setvar HUB_ACTIVITY_TABLE               "HubActivity"            -- "<[HUB_ACTIVITY_TABLE],SYSNAME,HubActivity>"                    
 :setvar NAMEVALUES_TABLE                 "NameValues"             -- "<[NAMEVALUES_TABLE],SYSNAME,NameValues>"                       
 :setvar NAMEVALUE_ACTIVITY_TABLE         "NameValueActivity"      -- "<[NAMEVALUE_ACTIVITY_TABLE],SYSNAME,NameValueActivity>"        
